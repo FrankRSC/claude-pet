@@ -65,6 +65,9 @@ struct App {
     areas_at: Instant,
     last_tick: Instant,
     last_pid_check: Instant,
+    last_scan: Instant,
+    /// Sesiones que ya tuvieron monito; el escaneo no las revive.
+    scanned: std::collections::HashSet<String>,
     tray: Option<Tray>,
     hidden: bool,
     demo_on_start: bool,
@@ -143,6 +146,8 @@ pub fn run(demo: bool) {
         areas_at: now,
         last_tick: now,
         last_pid_check: now,
+        last_scan: now,
+        scanned: Default::default(),
         tray: None,
         hidden: false,
         demo_on_start: demo,
@@ -158,6 +163,33 @@ fn demo_event(n: u32) -> Value {
         "session_id": format!("demo-{n}-{}", std::process::id()),
         "cwd": "demo",
     })
+}
+
+/// Sesiones vivas según ~/.claude/sessions/<pid>.json, que Claude Code mantiene
+/// para cada proceso. Cubre sesiones que abrieron antes de instalar los hooks.
+fn live_sessions() -> Vec<Value> {
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".claude").join("sessions")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter_map(|v| {
+            let pid = v["pid"].as_u64()?;
+            let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?;
+            platform::pid_alive(pid as u32).then(|| {
+                serde_json::json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": session,
+                    "cwd": v["cwd"].as_str().unwrap_or(""),
+                    "pet_pid": pid,
+                })
+            })
+        })
+        .collect()
 }
 
 fn label_from_cwd(cwd: &str) -> String {
@@ -313,6 +345,17 @@ impl App {
         Some(self.pets.len() - 1)
     }
 
+    fn scan_sessions(&mut self, el: &ActiveEventLoop) {
+        for v in live_sessions() {
+            let session = v["session_id"].as_str().unwrap_or("").to_string();
+            if self.scanned.contains(&session) || self.pets.iter().any(|p| p.pet.session == session) {
+                continue;
+            }
+            self.scanned.insert(session);
+            self.on_hook(el, v);
+        }
+    }
+
     fn on_hook(&mut self, el: &ActiveEventLoop, v: Value) {
         match v["cmd"].as_str() {
             Some("quit") => return el.exit(),
@@ -332,6 +375,7 @@ impl App {
             Some(i) => i,
             None if event == "SessionEnd" => return,
             None => {
+                self.scanned.insert(session.to_string());
                 let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""));
                 match self.spawn_pet(el, session.to_string(), label, pid) {
                     Some(i) => i,
@@ -404,6 +448,11 @@ impl App {
             self.areas_at = now;
         }
         self.handle_menu(el);
+
+        if now - self.last_scan > Duration::from_secs(3) {
+            self.last_scan = now;
+            self.scan_sessions(el);
+        }
 
         // Sesiones que murieron sin mandar SessionEnd.
         if now - self.last_pid_check > Duration::from_secs(10) {
@@ -529,6 +578,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.demo_on_start = false;
             self.on_hook(el, demo_event(0));
         }
+        self.scan_sessions(el);
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
