@@ -8,7 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::geom::{self, area_at, Rect};
@@ -23,6 +23,8 @@ const IDLE_FRAME: Duration = Duration::from_millis(250);
 
 pub enum UserEvent {
     Hook(Value),
+    /// Algo cambió en ~/.claude/sessions: puede haber una sesión nueva.
+    SessionsChanged,
 }
 
 struct Press {
@@ -65,6 +67,9 @@ struct App {
     areas_at: Instant,
     last_tick: Instant,
     last_pid_check: Instant,
+    /// Mientras viva, el sistema nos avisa de cada cambio en ~/.claude/sessions.
+    /// Si no se pudo crear, revisamos la carpeta cada pocos segundos.
+    watcher: Option<notify::RecommendedWatcher>,
     last_scan: Instant,
     /// Sesiones que ya tuvieron monito; el escaneo no las revive.
     scanned: std::collections::HashSet<String>,
@@ -146,6 +151,7 @@ pub fn run(demo: bool) {
         areas_at: now,
         last_tick: now,
         last_pid_check: now,
+        watcher: watch_sessions(event_loop.create_proxy()),
         last_scan: now,
         scanned: Default::default(),
         tray: None,
@@ -165,29 +171,39 @@ fn demo_event(n: u32) -> Value {
     })
 }
 
-/// Sesiones vivas según ~/.claude/sessions/<pid>.json, que Claude Code mantiene
-/// para cada proceso. Cubre sesiones que abrieron antes de instalar los hooks.
-fn live_sessions() -> Vec<Value> {
-    let Some(dir) = dirs::home_dir().map(|h| h.join(".claude").join("sessions")) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+fn sessions_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
+}
+
+/// Claude Code mantiene un ~/.claude/sessions/<pid>.json por proceso. Vigilamos
+/// esa carpeta para darle monito a cada sesión en cuanto aparece, aunque no
+/// mande ningún hook (por ejemplo, si abrió antes de instalar).
+fn watch_sessions(proxy: EventLoopProxy<UserEvent>) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let dir = sessions_dir()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok_and(|e| !e.kind.is_access()) {
+            let _ = proxy.send_event(UserEvent::SessionsChanged);
+        }
+    })
+    .ok()?;
+    watcher.watch(&dir, notify::RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
+}
+
+/// (session_id, pid, cwd) de cada registro en ~/.claude/sessions, vivo o no.
+fn session_records() -> Vec<(String, u32, String)> {
+    let Some(Ok(entries)) = sessions_dir().map(std::fs::read_dir) else { return Vec::new() };
     entries
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
         .filter_map(|v| {
-            let pid = v["pid"].as_u64()?;
-            let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?;
-            platform::pid_alive(pid as u32).then(|| {
-                serde_json::json!({
-                    "hook_event_name": "SessionStart",
-                    "session_id": session,
-                    "cwd": v["cwd"].as_str().unwrap_or(""),
-                    "pet_pid": pid,
-                })
-            })
+            let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?.to_string();
+            let pid = v["pid"].as_u64()? as u32;
+            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string()))
         })
         .collect()
 }
@@ -346,13 +362,19 @@ impl App {
     }
 
     fn scan_sessions(&mut self, el: &ActiveEventLoop) {
-        for v in live_sessions() {
-            let session = v["session_id"].as_str().unwrap_or("").to_string();
-            if self.scanned.contains(&session) || self.pets.iter().any(|p| p.pet.session == session) {
+        for (session, pid, cwd) in session_records() {
+            if self.scanned.contains(&session) || !platform::pid_alive(pid) {
                 continue;
             }
-            self.scanned.insert(session);
-            self.on_hook(el, v);
+            self.on_hook(
+                el,
+                serde_json::json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": session,
+                    "cwd": cwd,
+                    "pet_pid": pid,
+                }),
+            );
         }
     }
 
@@ -376,6 +398,7 @@ impl App {
             None if event == "SessionEnd" => return,
             None => {
                 self.scanned.insert(session.to_string());
+                debug_log(format_args!("monito nuevo: {session} ({event})"));
                 let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""));
                 match self.spawn_pet(el, session.to_string(), label, pid) {
                     Some(i) => i,
@@ -449,7 +472,7 @@ impl App {
         }
         self.handle_menu(el);
 
-        if now - self.last_scan > Duration::from_secs(3) {
+        if self.watcher.is_none() && now - self.last_scan > Duration::from_secs(3) {
             self.last_scan = now;
             self.scan_sessions(el);
         }
@@ -584,6 +607,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Hook(v) => self.on_hook(el, v),
+            UserEvent::SessionsChanged => self.scan_sessions(el),
         }
     }
 

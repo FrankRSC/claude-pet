@@ -226,6 +226,7 @@ pub fn set_autostart(exe: Option<&Path>) {
   <key>Label</key><string>com.claudepet.agent</string>
   <key>ProgramArguments</key><array><string>{}</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 </dict></plist>
 "#,
                 exe.display()
