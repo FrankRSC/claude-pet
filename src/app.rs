@@ -8,7 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::geom::{self, area_at, Rect};
@@ -23,6 +23,8 @@ const IDLE_FRAME: Duration = Duration::from_millis(250);
 
 pub enum UserEvent {
     Hook(Value),
+    /// Algo cambió en ~/.claude/sessions: puede haber una sesión nueva.
+    SessionsChanged,
 }
 
 struct Press {
@@ -65,6 +67,12 @@ struct App {
     areas_at: Instant,
     last_tick: Instant,
     last_pid_check: Instant,
+    /// Mientras viva, el sistema nos avisa de cada cambio en ~/.claude/sessions.
+    /// Si no se pudo crear, revisamos la carpeta cada pocos segundos.
+    watcher: Option<notify::RecommendedWatcher>,
+    last_scan: Instant,
+    /// Sesiones que ya tuvieron monito; el escaneo no las revive.
+    scanned: std::collections::HashSet<String>,
     tray: Option<Tray>,
     hidden: bool,
     demo_on_start: bool,
@@ -113,6 +121,22 @@ fn save_avatar_choice(choice: Option<usize>) {
     save_config("avatar", choice.map_or("aleatorio", sprites::name).into());
 }
 
+/// Avatar elegido a mano para cada proyecto (por nombre de carpeta).
+fn load_project_avatar(label: &str) -> Option<usize> {
+    let config = load_config();
+    let name = config["project_avatars"][label].as_str()?;
+    (0..sprites::count()).find(|&i| sprites::name(i) == name)
+}
+
+fn save_project_avatar(label: &str, avatar: usize) {
+    let mut map = load_config()["project_avatars"].clone();
+    if !map.is_object() {
+        map = serde_json::json!({});
+    }
+    map[label] = sprites::name(avatar).into();
+    save_config("project_avatars", map);
+}
+
 fn load_cell_px() -> u32 {
     load_config()["cell_px"].as_u64().map_or(5, |n| n as u32)
 }
@@ -143,6 +167,9 @@ pub fn run(demo: bool) {
         areas_at: now,
         last_tick: now,
         last_pid_check: now,
+        watcher: watch_sessions(event_loop.create_proxy()),
+        last_scan: now,
+        scanned: Default::default(),
         tray: None,
         hidden: false,
         demo_on_start: demo,
@@ -158,6 +185,43 @@ fn demo_event(n: u32) -> Value {
         "session_id": format!("demo-{n}-{}", std::process::id()),
         "cwd": "demo",
     })
+}
+
+fn sessions_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
+}
+
+/// Claude Code mantiene un ~/.claude/sessions/<pid>.json por proceso. Vigilamos
+/// esa carpeta para darle monito a cada sesión en cuanto aparece, aunque no
+/// mande ningún hook (por ejemplo, si abrió antes de instalar).
+fn watch_sessions(proxy: EventLoopProxy<UserEvent>) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let dir = sessions_dir()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok_and(|e| !e.kind.is_access()) {
+            let _ = proxy.send_event(UserEvent::SessionsChanged);
+        }
+    })
+    .ok()?;
+    watcher.watch(&dir, notify::RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
+}
+
+/// (session_id, pid, cwd) de cada registro en ~/.claude/sessions, vivo o no.
+fn session_records() -> Vec<(String, u32, String)> {
+    let Some(Ok(entries)) = sessions_dir().map(std::fs::read_dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter_map(|v| {
+            let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?.to_string();
+            let pid = v["pid"].as_u64()? as u32;
+            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string()))
+        })
+        .collect()
 }
 
 fn label_from_cwd(cwd: &str) -> String {
@@ -249,7 +313,10 @@ impl App {
 
     /// El avatar fijo elegido, o uno que dependa de la sesión y que no repita
     /// ninguno de los monitos que ya están en pantalla (mientras alcancen).
-    fn pick_avatar(&self, session: &str) -> usize {
+    fn pick_avatar(&self, session: &str, label: &str) -> usize {
+        if let Some(i) = load_project_avatar(label) {
+            return i;
+        }
         if let Some(i) = self.avatar_choice {
             return i;
         }
@@ -266,9 +333,20 @@ impl App {
         pw.look = sprites::look(avatar, pw.pet.color);
     }
 
+    /// Clic central o ⌥+clic: el siguiente avatar, solo para este monito. Se
+    /// recuerda para su proyecto.
+    fn next_avatar(pw: &mut PetWindow) {
+        let next = (pw.avatar + 1) % sprites::count();
+        Self::set_avatar(pw, next);
+        pw.pet.say(sprites::name(next), 1.5);
+        save_project_avatar(&pw.pet.label, next);
+    }
+
     fn choose_avatar(&mut self, choice: Option<usize>) {
         self.avatar_choice = choice;
         save_avatar_choice(choice);
+        // Elegir desde el menú manda sobre lo que se eligió monito por monito.
+        save_config("project_avatars", serde_json::json!({}));
         if let Some(tray) = &self.tray {
             for (k, item) in tray.avatars.iter().enumerate() {
                 item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
@@ -277,7 +355,7 @@ impl App {
         // Reasignamos a todos, uno por uno, para que en modo aleatorio no se repitan.
         let pets = std::mem::take(&mut self.pets);
         for mut pw in pets {
-            let avatar = self.pick_avatar(&pw.pet.session);
+            let avatar = self.pick_avatar(&pw.pet.session, &pw.pet.label);
             Self::set_avatar(&mut pw, avatar);
             self.pets.push(pw);
         }
@@ -297,7 +375,7 @@ impl App {
         // Aparece en el monitor donde está el cursor.
         let (cx, cy) = platform::cursor_pos();
         let area = area_at(&self.areas, cx, cy);
-        let avatar = self.pick_avatar(&session);
+        let avatar = self.pick_avatar(&session, &label);
         let pet = Pet::new(session, label, pid, area, self.pets.len());
         let look = sprites::look(avatar, pet.color);
         self.pets.push(PetWindow {
@@ -311,6 +389,23 @@ impl App {
             shown: false,
         });
         Some(self.pets.len() - 1)
+    }
+
+    fn scan_sessions(&mut self, el: &ActiveEventLoop) {
+        for (session, pid, cwd) in session_records() {
+            if self.scanned.contains(&session) || !platform::pid_alive(pid) {
+                continue;
+            }
+            self.on_hook(
+                el,
+                serde_json::json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": session,
+                    "cwd": cwd,
+                    "pet_pid": pid,
+                }),
+            );
+        }
     }
 
     fn on_hook(&mut self, el: &ActiveEventLoop, v: Value) {
@@ -332,6 +427,8 @@ impl App {
             Some(i) => i,
             None if event == "SessionEnd" => return,
             None => {
+                self.scanned.insert(session.to_string());
+                debug_log(format_args!("monito nuevo: {session} ({event})"));
                 let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""));
                 match self.spawn_pet(el, session.to_string(), label, pid) {
                     Some(i) => i,
@@ -404,6 +501,11 @@ impl App {
             self.areas_at = now;
         }
         self.handle_menu(el);
+
+        if self.watcher.is_none() && now - self.last_scan > Duration::from_secs(3) {
+            self.last_scan = now;
+            self.scan_sessions(el);
+        }
 
         // Sesiones que murieron sin mandar SessionEnd.
         if now - self.last_pid_check > Duration::from_secs(10) {
@@ -529,11 +631,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.demo_on_start = false;
             self.on_hook(el, demo_event(0));
         }
+        self.scan_sessions(el);
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Hook(v) => self.on_hook(el, v),
+            UserEvent::SessionsChanged => self.scan_sessions(el),
         }
     }
 
@@ -544,6 +648,8 @@ impl ApplicationHandler<UserEvent> for App {
         let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = event else { return };
         let Some(pw) = self.pets.iter_mut().find(|pw| pw.window.id() == id) else { return };
         match button {
+            MouseButton::Middle => Self::next_avatar(pw),
+            MouseButton::Left if platform::alt_down() => Self::next_avatar(pw),
             MouseButton::Left => {
                 let c = platform::cursor_pos();
                 let now = Instant::now();
@@ -558,11 +664,6 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             MouseButton::Right => pw.pet.toggle_sleep(),
-            MouseButton::Middle => {
-                let next = (pw.avatar + 1) % sprites::count();
-                Self::set_avatar(pw, next);
-                pw.pet.say(sprites::name(next), 1.5);
-            }
             _ => {}
         }
     }

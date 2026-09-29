@@ -15,7 +15,7 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Threading::{OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -212,6 +212,10 @@ pub fn cursor_pos() -> (f32, f32) {
 
 pub fn left_button_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 }
+}
+
+pub fn alt_down() -> bool {
+    unsafe { (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0 }
 }
 
 pub fn pid_alive(pid: u32) -> bool {
