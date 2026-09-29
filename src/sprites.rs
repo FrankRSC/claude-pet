@@ -172,7 +172,7 @@ pub fn cell(frame: &Frame, x: usize, y: usize, base: [u8; 3]) -> Option<[u8; 3]>
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pose {
     Stand,
     Blink,

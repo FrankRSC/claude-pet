@@ -46,7 +46,7 @@ pub struct World<'a> {
     pub cursor: (f32, f32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Wall {
     Left,
     Right,
@@ -324,6 +324,11 @@ impl Pet {
     }
 
     /// Velocidad si va volando rápido (para chocar con otros monitos).
+    /// Parado sobre una ventana (y no en el borde de la pantalla).
+    pub fn perched(&self) -> bool {
+        self.perch.is_some()
+    }
+
     pub fn flying_velocity(&self) -> Option<(f32, f32)> {
         let fast = self.vx * self.vx + self.vy * self.vy > 450.0 * 450.0;
         (self.mode == Mode::Falling && fast).then_some((self.vx, self.vy))

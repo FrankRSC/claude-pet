@@ -1,6 +1,6 @@
 [package]
 name = "claude-pet"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Un monito de escritorio por cada sesión de Claude Code"
 
@@ -27,6 +27,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 core-graphics = "0.24"
@@ -36,4 +37,6 @@ foreign-types = "0.5"
 [profile.release]
 opt-level = 3
 lto = true
+codegen-units = 1
+panic = "abort"
 strip = true

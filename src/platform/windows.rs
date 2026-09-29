@@ -3,7 +3,7 @@ use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows_sys::Win32::Foundation::*;
@@ -88,14 +88,19 @@ impl Surface {
     }
 
     /// Pinta el buffer y mueve la ventana a (x, y) en una sola llamada.
-    pub fn present(&mut self, _window: &Window, buf: &[u32], x: i32, y: i32) {
+    pub fn move_to(&self, _window: &Window, x: i32, y: i32) {
+        unsafe {
+            SetWindowPos(self.hwnd, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    pub fn present(&mut self, _window: &Window, buf: &[u32]) {
         if self.bits.is_null() {
             return;
         }
         unsafe {
             std::ptr::copy_nonoverlapping(buf.as_ptr(), self.bits, (self.w * self.h) as usize);
             GdiFlush();
-            let dst = POINT { x, y };
             let size = SIZE { cx: self.w, cy: self.h };
             let src = POINT { x: 0, y: 0 };
             let blend = BLENDFUNCTION {
@@ -105,7 +110,8 @@ impl Surface {
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             let screen = GetDC(null_mut());
-            UpdateLayeredWindow(self.hwnd, screen, &dst, &size, self.mem_dc, &src, 0, &blend, ULW_ALPHA);
+            // Sin posición de destino: la ventana se queda donde la dejó `move_to`.
+            UpdateLayeredWindow(self.hwnd, screen, null(), &size, self.mem_dc, &src, 0, &blend, ULW_ALPHA);
             ReleaseDC(null_mut(), screen);
         }
     }
@@ -216,6 +222,10 @@ pub fn left_button_down() -> bool {
 
 pub fn alt_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0 }
+}
+
+pub fn low_power() -> bool {
+    false
 }
 
 pub fn pid_alive(pid: u32) -> bool {
