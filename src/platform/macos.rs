@@ -182,6 +182,13 @@ pub fn left_button_down() -> bool {
     buttons & 1 != 0
 }
 
+/// ⌥ Option presionada: con trackpad no hay clic central.
+pub fn alt_down() -> bool {
+    const OPTION: usize = 1 << 19; // NSEventModifierFlagOption
+    let flags: usize = unsafe { msg_send![class!(NSEvent), modifierFlags] };
+    flags & OPTION != 0
+}
+
 pub fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])

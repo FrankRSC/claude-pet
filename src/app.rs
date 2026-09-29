@@ -121,6 +121,22 @@ fn save_avatar_choice(choice: Option<usize>) {
     save_config("avatar", choice.map_or("aleatorio", sprites::name).into());
 }
 
+/// Avatar elegido a mano para cada proyecto (por nombre de carpeta).
+fn load_project_avatar(label: &str) -> Option<usize> {
+    let config = load_config();
+    let name = config["project_avatars"][label].as_str()?;
+    (0..sprites::count()).find(|&i| sprites::name(i) == name)
+}
+
+fn save_project_avatar(label: &str, avatar: usize) {
+    let mut map = load_config()["project_avatars"].clone();
+    if !map.is_object() {
+        map = serde_json::json!({});
+    }
+    map[label] = sprites::name(avatar).into();
+    save_config("project_avatars", map);
+}
+
 fn load_cell_px() -> u32 {
     load_config()["cell_px"].as_u64().map_or(5, |n| n as u32)
 }
@@ -297,7 +313,10 @@ impl App {
 
     /// El avatar fijo elegido, o uno que dependa de la sesión y que no repita
     /// ninguno de los monitos que ya están en pantalla (mientras alcancen).
-    fn pick_avatar(&self, session: &str) -> usize {
+    fn pick_avatar(&self, session: &str, label: &str) -> usize {
+        if let Some(i) = load_project_avatar(label) {
+            return i;
+        }
         if let Some(i) = self.avatar_choice {
             return i;
         }
@@ -314,9 +333,20 @@ impl App {
         pw.look = sprites::look(avatar, pw.pet.color);
     }
 
+    /// Clic central o ⌥+clic: el siguiente avatar, solo para este monito. Se
+    /// recuerda para su proyecto.
+    fn next_avatar(pw: &mut PetWindow) {
+        let next = (pw.avatar + 1) % sprites::count();
+        Self::set_avatar(pw, next);
+        pw.pet.say(sprites::name(next), 1.5);
+        save_project_avatar(&pw.pet.label, next);
+    }
+
     fn choose_avatar(&mut self, choice: Option<usize>) {
         self.avatar_choice = choice;
         save_avatar_choice(choice);
+        // Elegir desde el menú manda sobre lo que se eligió monito por monito.
+        save_config("project_avatars", serde_json::json!({}));
         if let Some(tray) = &self.tray {
             for (k, item) in tray.avatars.iter().enumerate() {
                 item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
@@ -325,7 +355,7 @@ impl App {
         // Reasignamos a todos, uno por uno, para que en modo aleatorio no se repitan.
         let pets = std::mem::take(&mut self.pets);
         for mut pw in pets {
-            let avatar = self.pick_avatar(&pw.pet.session);
+            let avatar = self.pick_avatar(&pw.pet.session, &pw.pet.label);
             Self::set_avatar(&mut pw, avatar);
             self.pets.push(pw);
         }
@@ -345,7 +375,7 @@ impl App {
         // Aparece en el monitor donde está el cursor.
         let (cx, cy) = platform::cursor_pos();
         let area = area_at(&self.areas, cx, cy);
-        let avatar = self.pick_avatar(&session);
+        let avatar = self.pick_avatar(&session, &label);
         let pet = Pet::new(session, label, pid, area, self.pets.len());
         let look = sprites::look(avatar, pet.color);
         self.pets.push(PetWindow {
@@ -618,6 +648,8 @@ impl ApplicationHandler<UserEvent> for App {
         let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = event else { return };
         let Some(pw) = self.pets.iter_mut().find(|pw| pw.window.id() == id) else { return };
         match button {
+            MouseButton::Middle => Self::next_avatar(pw),
+            MouseButton::Left if platform::alt_down() => Self::next_avatar(pw),
             MouseButton::Left => {
                 let c = platform::cursor_pos();
                 let now = Instant::now();
@@ -632,11 +664,6 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             MouseButton::Right => pw.pet.toggle_sleep(),
-            MouseButton::Middle => {
-                let next = (pw.avatar + 1) % sprites::count();
-                Self::set_avatar(pw, next);
-                pw.pet.say(sprites::name(next), 1.5);
-            }
             _ => {}
         }
     }

@@ -64,7 +64,7 @@ claude-pet quit
 - **Clic:** globo con el proyecto y su estado.
 - **Arrastrar y soltar:** lo lanzas. Si choca con otro monito, lo tumba. Si lo sueltas sobre una ventana, aterriza en ella.
 - **Clic derecho:** dormir o despertar.
-- **Clic central:** cambiar su avatar.
+- **⌥ Option + clic** (Alt + clic en Windows) **o clic central:** cambiar su avatar, solo el de ese monito. Se recuerda para su proyecto; elegir un avatar desde el menú borra esas elecciones.
 - **Pasar el cursor encima:** se detiene y se pone feliz. A veces te persigue.
 
 **Con la pantalla:**
