@@ -11,6 +11,7 @@ mod platform;
 mod render;
 mod skins;
 mod sprites;
+mod updater;
 
 /// Puerto local donde la app escucha los eventos de los hooks.
 pub const PORT: u16 = 47823;
@@ -19,7 +20,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
     match args.get(1).map(String::as_str).unwrap_or("run") {
-        "run" => app::run(has("--demo")),
+        "run" => app::run(has("--demo"), has("--wait")),
         "hook" => hook_client::run(),
         "install" => {
             platform::attach_console();

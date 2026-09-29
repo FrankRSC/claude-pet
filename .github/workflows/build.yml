@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -44,3 +45,26 @@ jobs:
         with:
           name: claude-pet-${{ runner.os }}
           path: dist/
+
+  # Al subir un tag v1.2.3 se publica un release; el botón "Buscar actualización"
+  # de la app descarga de ahí claude-pet-macos o claude-pet-windows.exe.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: El tag coincide con Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME pero Cargo.toml dice $version"; exit 1; }
+      - uses: actions/download-artifact@v4
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv claude-pet-macOS/claude-pet claude-pet-macos
+          mv claude-pet-Windows/claude-pet.exe claude-pet-windows.exe
+          gh release create "$GITHUB_REF_NAME" claude-pet-macos claude-pet-windows.exe --generate-notes

@@ -71,13 +71,25 @@ claude-pet quit
 - **Ventanas:** usan el borde de arriba de cualquier ventana no maximizada como plataforma. Saltan a ella, caminan encima y se tiran por la orilla. Si mueves la ventana, se van con ella. Si la cierras, la minimizas o la tapas con otra, se caen.
 - **Bordes:** caminan sobre la barra de tareas o el Dock, trepan las paredes, andan por el techo y pasan de un monitor a otro.
 
-**Bandeja / barra de menú:** monito de prueba, Avatar, Tamaño, ocultar, notificaciones on/off, salir. La configuración se guarda en `config.json` junto al binario instalado.
+**Bandeja / barra de menú:** monito de prueba, Avatar, Tamaño, ocultar, notificaciones on/off, buscar actualización, salir. La configuración se guarda en `config.json` junto al binario instalado.
 
 ## Avatares
 
 Hay 24: Monito, Gato, Perro, Robot, Fantasma, Alien, Panda, Pingüino, Zorro, Conejo, Dinosaurio, Nube, Esqueleto, Bruja, Fuego, Planta, Hielo, Roca, Ninja, Vaquero, Astronauta, Fantasma de fuego, Tiburón y Mago. Por defecto cada sesión recibe uno distinto.
 
 Para agregar uno, añade un `Skin` en `src/skins.rs` con un sprite de 16×16 y su paleta. Una fila de 8 caracteres se refleja y queda simétrica. Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. `cargo test` revisa los sprites y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
+
+## Actualizaciones
+
+**Buscar actualización** en el menú consulta el último release de GitHub. Si es más nuevo que la versión instalada, descarga el binario, lo pone en lugar del actual y reinicia la app.
+
+Para publicar una versión: sube `version` en `Cargo.toml`, haz commit y sube un tag igual:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+El CI compila, revisa que el tag coincida con `Cargo.toml` y publica el release con `claude-pet-macos` y `claude-pet-windows.exe`.
 
 ## Estructura
 

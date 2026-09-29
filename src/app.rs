@@ -16,7 +16,7 @@ use crate::pet::{self, fmt_duration, hash, size, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
-use crate::{ipc, sprites};
+use crate::{ipc, sprites, updater};
 
 const FRAME: Duration = Duration::from_millis(16);
 const IDLE_FRAME: Duration = Duration::from_millis(250);
@@ -25,6 +25,10 @@ pub enum UserEvent {
     Hook(Value),
     /// Algo cambió en ~/.claude/sessions: puede haber una sesión nueva.
     SessionsChanged,
+    /// La revisión automática encontró esta versión publicada.
+    Available(String),
+    /// Terminó de buscar (e instalar) una actualización.
+    Update(Result<updater::Outcome, String>),
 }
 
 struct Press {
@@ -57,6 +61,7 @@ struct Tray {
     avatars: Vec<CheckMenuItem>,
     /// Mismo orden que `SIZES`.
     sizes: Vec<CheckMenuItem>,
+    update: MenuItem,
     quit: MenuId,
 }
 
@@ -67,6 +72,10 @@ struct App {
     areas_at: Instant,
     last_tick: Instant,
     last_pid_check: Instant,
+    last_update_check: Instant,
+    /// Versión nueva publicada, si la revisión automática encontró una.
+    available: Option<String>,
+    proxy: EventLoopProxy<UserEvent>,
     /// Mientras viva, el sistema nos avisa de cada cambio en ~/.claude/sessions.
     /// Si no se pudo crear, revisamos la carpeta cada pocos segundos.
     watcher: Option<notify::RecommendedWatcher>,
@@ -141,8 +150,19 @@ fn load_cell_px() -> u32 {
     load_config()["cell_px"].as_u64().map_or(5, |n| n as u32)
 }
 
-pub fn run(demo: bool) {
-    let Some(listener) = ipc::bind() else {
+/// `wait`: venimos de una actualización y la instancia anterior todavía está
+/// soltando el puerto.
+pub fn run(demo: bool, wait: bool) {
+    let mut listener = ipc::bind();
+    for _ in 0..if wait { 50 } else { 0 } {
+        if listener.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        listener = ipc::bind();
+    }
+    updater::cleanup();
+    let Some(listener) = listener else {
         // Ya hay una instancia; si pidieron demo, se la mandamos a ella.
         if demo {
             ipc::send(&demo_event(0), Duration::from_millis(500));
@@ -167,6 +187,9 @@ pub fn run(demo: bool) {
         areas_at: now,
         last_tick: now,
         last_pid_check: now,
+        last_update_check: now,
+        available: None,
+        proxy: event_loop.create_proxy(),
         watcher: watch_sessions(event_loop.create_proxy()),
         last_scan: now,
         scanned: Default::default(),
@@ -224,6 +247,22 @@ fn session_records() -> Vec<(String, u32, String)> {
         .collect()
 }
 
+fn update_label(available: Option<&str>) -> String {
+    match available {
+        Some(v) => format!("Actualizar a v{v}"),
+        None => format!("Buscar actualización (v{})", updater::current()),
+    }
+}
+
+/// Revisa en segundo plano si hay versión nueva y avisa al event loop.
+fn check_available(proxy: EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || {
+        if let Some(v) = updater::available() {
+            let _ = proxy.send_event(UserEvent::Available(v));
+        }
+    });
+}
+
 fn label_from_cwd(cwd: &str) -> String {
     let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
     if name.is_empty() { "Claude".into() } else { name.into() }
@@ -249,6 +288,7 @@ impl App {
         let demo = MenuItem::new("Monito de prueba", true, None);
         let hide = CheckMenuItem::new("Ocultar monitos", true, false, None);
         let notify = CheckMenuItem::new("Notificaciones", true, true, None);
+        let update = MenuItem::new(update_label(self.available.as_deref()), true, None);
         let quit = MenuItem::new("Salir", true, None);
         let avatar_menu = Submenu::new("Avatar", true);
         let mut avatars = vec![CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None)];
@@ -275,6 +315,7 @@ impl App {
             &hide,
             &notify,
             &PredefinedMenuItem::separator(),
+            &update,
             &quit,
         ]);
         let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Claude Pet");
@@ -289,6 +330,7 @@ impl App {
                 notify,
                 avatars,
                 sizes,
+                update,
                 quit: quit.id().clone(),
             });
         }
@@ -469,6 +511,39 @@ impl App {
         }
     }
 
+    fn on_available(&mut self, version: String) {
+        if let Some(tray) = &self.tray {
+            tray.update.set_text(update_label(Some(&version)));
+        }
+        // Una notificación por versión, aunque la app se reinicie.
+        if load_config()["notified_version"].as_str() != Some(version.as_str()) {
+            notify(
+                format!("Claude Pet v{version} disponible"),
+                format!("Haz clic en «Actualizar a v{version}» en el menú de Claude Pet."),
+            );
+            save_config("notified_version", version.as_str().into());
+        }
+        self.available = Some(version);
+    }
+
+    fn on_update(&mut self, el: &ActiveEventLoop, result: Result<updater::Outcome, String>) {
+        if let Some(tray) = &self.tray {
+            tray.update.set_enabled(true);
+            tray.update.set_text(update_label(self.available.as_deref()));
+        }
+        match result {
+            Ok(updater::Outcome::UpToDate) => {
+                notify("Claude Pet".into(), format!("Ya tienes la última versión ({}).", updater::current()));
+            }
+            Ok(updater::Outcome::Installed { version, exe }) => {
+                notify("Claude Pet actualizado".into(), format!("Versión {version}. Reiniciando…"));
+                platform::spawn_detached(&exe, &["run", "--wait"]);
+                el.exit();
+            }
+            Err(e) => notify("No se pudo actualizar".into(), e),
+        }
+    }
+
     fn handle_menu(&mut self, el: &ActiveEventLoop) {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let Some(tray) = &self.tray else { return };
@@ -478,6 +553,13 @@ impl App {
                 self.choose_size(SIZES[k].1);
             } else if ev.id == tray.quit {
                 el.exit();
+            } else if ev.id == *tray.update.id() {
+                tray.update.set_enabled(false);
+                tray.update.set_text("Buscando actualización…");
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Update(updater::check_and_install()));
+                });
             } else if ev.id == tray.demo {
                 self.demo_count += 1;
                 let v = demo_event(self.demo_count);
@@ -508,6 +590,11 @@ impl App {
         }
 
         // Sesiones que murieron sin mandar SessionEnd.
+        if now - self.last_update_check > Duration::from_secs(6 * 60 * 60) {
+            self.last_update_check = now;
+            check_available(self.proxy.clone());
+        }
+
         if now - self.last_pid_check > Duration::from_secs(10) {
             self.last_pid_check = now;
             for pw in &mut self.pets {
@@ -626,6 +713,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.tray.is_none() {
             self.build_tray();
+            check_available(self.proxy.clone());
         }
         if self.demo_on_start {
             self.demo_on_start = false;
@@ -638,6 +726,8 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Hook(v) => self.on_hook(el, v),
             UserEvent::SessionsChanged => self.scan_sessions(el),
+            UserEvent::Update(result) => self.on_update(el, result),
+            UserEvent::Available(v) => self.on_available(v),
         }
     }
 
