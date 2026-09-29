@@ -16,10 +16,10 @@ cargo build --release
 ./target/release/claude-pet install
 ```
 
-Opción 2: binario del CI. En la pestaña **Actions** del repo, abre la última corrida verde y descarga `claude-pet-macOS`. Es universal (Intel y Apple Silicon). Luego:
+Opción 2: binario ya compilado. Descarga `claude-pet-macos` del [último release](https://github.com/FrankRSC/claude-pet/releases/latest). Es universal (Intel y Apple Silicon). Luego:
 
 ```sh
-unzip claude-pet-macOS.zip
+mv claude-pet-macos claude-pet
 xattr -d com.apple.quarantine claude-pet   # macOS bloquea binarios descargados sin firmar
 chmod +x claude-pet
 ./claude-pet install
@@ -29,7 +29,15 @@ Con `install`, el binario se copia a `~/Library/Application Support/claude-pet/`
 
 ### Windows
 
-Toolchain GNU de Rust más MinGW-w64, que da `dlltool` (también sirve la toolchain MSVC si tienes Visual Studio Build Tools):
+Opción 1: binario ya compilado. Descarga `claude-pet-windows.exe` del [último release](https://github.com/FrankRSC/claude-pet/releases/latest) y córrelo con `install`:
+
+```
+claude-pet-windows.exe install
+```
+
+El binario no está firmado, así que Windows SmartScreen puede mostrar "Windows protegió tu PC": dale a **Más información → Ejecutar de todas formas**.
+
+Opción 2: compilar. Toolchain GNU de Rust más MinGW-w64, que da `dlltool` (también sirve la toolchain MSVC si tienes Visual Studio Build Tools):
 
 ```
 winget install BrechtSanders.WinLibs.POSIX.UCRT
@@ -81,15 +89,46 @@ Para agregar uno, añade un `Skin` en `src/skins.rs` con un sprite de 16×16 y s
 
 ## Actualizaciones
 
-**Buscar actualización** en el menú consulta el último release de GitHub. Si es más nuevo que la versión instalada, descarga el binario, lo pone en lugar del actual y reinicia la app.
+La app se actualiza sola desde los [releases de GitHub](https://github.com/FrankRSC/claude-pet/releases):
 
-Para publicar una versión: sube `version` en `Cargo.toml`, haz commit y sube un tag igual:
+- **Automático:** cada 6 horas revisa si hay una versión nueva. Si la hay, te avisa con una notificación (una sola vez por versión) y el menú cambia a **"Actualizar a vX.Y.Z"**.
+- **Manual:** en el menú, **"Buscar actualización (vX.Y.Z)"** revisa en ese momento. Si hay una más nueva, la descarga, reemplaza el binario instalado y reinicia la app.
 
-```sh
-git tag v0.2.0 && git push origin v0.2.0
-```
+Mensajes posibles:
 
-El CI compila, revisa que el tag coincida con `Cargo.toml` y publica el release con `claude-pet-macos` y `claude-pet-windows.exe`.
+| Mensaje | Qué significa |
+|---|---|
+| Ya tienes la última versión | Tu versión es igual o más nueva que el último release. |
+| No pude consultar GitHub (¿hay releases publicados?) | Sin internet, GitHub no respondió o el repo todavía no tiene releases. |
+| El release vX.Y.Z no trae … | El release existe pero no trae el binario de tu sistema. |
+| Falló la descarga | La descarga se cortó o llegó incompleta; el binario instalado no se tocó. |
+
+El actualizador instala el binario del último release sin verificar firmas: confía en quien pueda publicar releases en este repo.
+
+## Publicar una versión
+
+Los releases los publica el CI cuando subes un tag `v*`. Para sacar la versión `0.2.0`:
+
+1. Sube `version = "0.2.0"` en `Cargo.toml` y fusiónalo a `main` (con PR, ver abajo).
+2. Crea y sube el tag, **igual** a la versión de `Cargo.toml`:
+   ```sh
+   git checkout main && git pull
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+3. El CI (pestaña **Actions**) compila en macOS y Windows, revisa que el tag coincida con `Cargo.toml` (si no, falla sin publicar nada) y crea el release con `claude-pet-macos` y `claude-pet-windows.exe`.
+
+Las apps instaladas lo detectan en las siguientes 6 horas, o al momento con "Buscar actualización".
+
+## Contribuir
+
+`main` está protegida por la regla **"Proteger main"**:
+
+- Todo cambio entra por **pull request**, con el CI verde en macOS y Windows.
+- Hace falta **1 aprobación** de alguien distinto al autor del PR. Si hay cambios después de aprobar, se vuelve a pedir la aprobación.
+- No se puede borrar `main` ni hacer force-push.
+
+Cualquiera puede proponer cambios con un PR desde un fork, pero solo quien tiene permiso de escritura puede fusionar, y siempre con la aprobación del dueño. El dueño del repo (admin) puede fusionar sus propios PRs saltándose la aprobación: en la página del PR marca **"Merge without waiting for requirements to be met (bypass rules)"**, o usa `gh pr merge <número> --admin`.
 
 ## Estructura
 
