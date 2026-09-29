@@ -20,7 +20,7 @@ pub fn off() -> f32 {
 const TEXT_PX: f32 = 15.0;
 const INK: [u8; 3] = [40, 32, 30];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash)]
 enum Orient {
     Up,
     Ceiling,
@@ -57,7 +57,10 @@ fn blend(px: &mut u32, [r, g, b]: [u8; 3], a: f32) {
     if a <= 0.0 {
         return;
     }
-    let a = a.min(1.0);
+    if a >= 1.0 {
+        *px = 0xff00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        return;
+    }
     let inv = 1.0 - a;
     let ch = |shift: u32, src: u8| {
         let dst = ((*px >> shift) & 0xff) as f32;
@@ -119,6 +122,23 @@ impl Renderer {
             s.pop();
         }
         format!("{}…", s.trim_end())
+    }
+
+    /// Todo lo que decide cómo se ve el cuadro (no dónde está). Si no cambia,
+    /// el cuadro anterior sirve y no hay que volver a dibujar.
+    pub fn visual_key(pet: &Pet, room_above: bool) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let (pose, orient) = pick_pose(pet);
+        (pose, orient, pet.facing_left(), room_above, cell_px()).hash(&mut h);
+        ((pet.alpha * 255.0) as u8).hash(&mut h);
+        match &pet.bubble {
+            Some((text, _)) => text.hash(&mut h),
+            None if pet.busy() => ((pet.anim * 4.0) as i32 % 3).hash(&mut h),
+            None if pet.mode == Mode::Sleeping => ((pet.anim * 2.0).sin() * 3.0).round().to_bits().hash(&mut h),
+            None => {}
+        }
+        h.finish()
     }
 
     /// `room_above`: si hay espacio arriba para el globo (si no, va abajo).

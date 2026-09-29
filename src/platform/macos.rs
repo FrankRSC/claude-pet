@@ -30,6 +30,7 @@ pub fn window_attributes(attrs: WindowAttributes) -> WindowAttributes {
 
 pub struct Surface {
     layer: *mut AnyObject,
+    colorspace: CGColorSpace,
     w: usize,
     h: usize,
 }
@@ -45,15 +46,25 @@ impl Surface {
             let layer: *mut AnyObject = msg_send![view, layer];
             let ns_window: *mut AnyObject = msg_send![view, window];
             let _: () = msg_send![ns_window, setHasShadow: false];
+            // Ventana e imagen en sRGB: así Core Animation no tiene que convertir
+            // cada cuadro al espacio de color de la pantalla.
+            let srgb: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
+            let _: () = msg_send![ns_window, setColorSpace: srgb];
             // canJoinAllSpaces | stationary | ignoresCycle: visible en todos los escritorios.
             let _: () = msg_send![ns_window, setCollectionBehavior: (1usize << 0) | (1 << 4) | (1 << 6)];
-            Surface { layer, w: w as usize, h: h as usize }
+            let colorspace = CGColorSpace::create_with_name(core_graphics::color_space::kCGColorSpaceSRGB)
+                .unwrap_or_else(CGColorSpace::create_device_rgb);
+            Surface { layer, colorspace, w: w as usize, h: h as usize }
         }
     }
 
-    pub fn present(&mut self, window: &Window, buf: &[u32], x: i32, y: i32) {
+    pub fn move_to(&self, window: &Window, x: i32, y: i32) {
         window.set_outer_position(PhysicalPosition::new(x, y));
-        let bytes: Vec<u8> = buf.iter().flat_map(|p| p.to_le_bytes()).collect();
+    }
+
+    pub fn present(&mut self, _window: &Window, buf: &[u32]) {
+        // BGRA en little-endian: los u32 ya tienen el orden de bytes que pide CGImage.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 4) }.to_vec();
         let provider = CGDataProvider::from_buffer(Arc::new(bytes));
         let image = CGImage::new(
             self.w,
@@ -61,7 +72,7 @@ impl Surface {
             8,
             32,
             self.w * 4,
-            &CGColorSpace::create_device_rgb(),
+            &self.colorspace,
             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
             &provider,
             false,
@@ -94,13 +105,24 @@ unsafe fn screens() -> Vec<(NSRect, NSRect, f64)> {
         .collect()
 }
 
+/// Alto y escala de la pantalla principal. Se usa en cada cuadro (cursor,
+/// ventanas), así que se guarda y solo se recalcula en `work_areas`.
+static MAIN_SCREEN: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+fn read_main_screen() -> (f64, f64) {
+    let v = unsafe { screens().first().map(|(f, _, s)| (f.size.height, *s)).unwrap_or((1080.0, 1.0)) };
+    *MAIN_SCREEN.lock().unwrap() = Some(v);
+    v
+}
+
 fn main_height_and_scale() -> (f64, f64) {
-    unsafe { screens().first().map(|(f, _, s)| (f.size.height, *s)).unwrap_or((1080.0, 1.0)) }
+    let cached = *MAIN_SCREEN.lock().unwrap();
+    cached.unwrap_or_else(read_main_screen)
 }
 
 /// Áreas visibles (sin barra de menú ni Dock) en píxeles físicos.
 pub fn work_areas() -> Vec<Rect> {
-    let (main_h, _) = main_height_and_scale();
+    let (main_h, _) = read_main_screen();
     unsafe {
         screens()
             .into_iter()
@@ -189,26 +211,36 @@ pub fn alt_down() -> bool {
     flags & OPTION != 0
 }
 
+/// Modo de bajo consumo de macOS (el de la batería) activado.
+pub fn low_power() -> bool {
+    unsafe {
+        let info: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+        msg_send![info, isLowPowerModeEnabled]
+    }
+}
+
 pub fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    // Señal 0: solo pregunta si existe. EPERM = existe pero es de otro usuario.
+    let ok = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// (ppid, nombre) de un proceso, sin lanzar `ps`.
+fn parent_of(pid: u32) -> Option<(u32, String)> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size)
+    };
+    if got != size {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(info.pbi_comm.as_ptr()) }.to_string_lossy().into_owned();
+    Some((info.pbi_ppid, name))
 }
 
 pub fn find_claude_pid() -> Option<u32> {
-    let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output().ok()?;
-    let table: std::collections::HashMap<u32, (u32, String)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            Some((pid, (ppid, it.collect::<Vec<_>>().join(" "))))
-        })
-        .collect();
-    super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned())
+    super::find_ancestor(std::process::id(), parent_of)
 }
 
 pub fn spawn_detached(exe: &Path, args: &[&str]) {

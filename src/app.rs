@@ -12,17 +12,29 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::geom::{self, area_at, Rect};
-use crate::pet::{self, fmt_duration, hash, size, Pet, World};
+use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
 use crate::{ipc, sprites, updater};
 
-const FRAME: Duration = Duration::from_millis(16);
-const IDLE_FRAME: Duration = Duration::from_millis(250);
+/// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
+/// arrastras necesita 60; el sprite se anima a 4 por segundo.
+const FAST: Duration = Duration::from_millis(16);
+const MOVING: Duration = Duration::from_millis(50);
+const STILL: Duration = Duration::from_millis(125);
+const ASLEEP: Duration = Duration::from_millis(500);
+/// Sin monitos: solo hay que despertar para los temporizadores largos. Los
+/// hooks, el menú y la carpeta de sesiones despiertan al loop por su cuenta.
+const EMPTY: Duration = Duration::from_secs(60);
+/// La lista de ventanas del sistema es lo más caro de cada cuadro.
+const FLOORS_EVERY: Duration = Duration::from_millis(200);
+/// Pasos de física máximos, para que un cuadro lento no atraviese el piso.
+const MAX_STEP: f32 = 0.05;
 
 pub enum UserEvent {
     Hook(Value),
+    Menu(MenuEvent),
     /// Algo cambió en ~/.claude/sessions: puede haber una sesión nueva.
     SessionsChanged,
     /// La revisión automática encontró esta versión publicada.
@@ -50,6 +62,10 @@ struct PetWindow {
     window: Window,
     press: Option<Press>,
     shown: bool,
+    /// Cómo se veía el último cuadro dibujado (`Renderer::visual_key` + avatar)
+    /// y dónde: si no cambian, no se dibuja ni se toca la ventana.
+    last_frame: u64,
+    last_pos: (i32, i32),
 }
 
 struct Tray {
@@ -70,6 +86,9 @@ struct App {
     renderer: Renderer,
     areas: Vec<Rect>,
     areas_at: Instant,
+    floors: Vec<geom::Floor>,
+    floors_at: Instant,
+    low_power: bool,
     last_tick: Instant,
     last_pid_check: Instant,
     last_update_check: Instant,
@@ -177,6 +196,11 @@ pub fn run(demo: bool, wait: bool) {
     }
     let event_loop = builder.build().expect("no pude crear el event loop");
     ipc::serve(listener, event_loop.create_proxy());
+    // El menú despierta al loop en vez de revisarlo en cada cuadro.
+    let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    MenuEvent::set_event_handler(Some(move |e| {
+        let _ = proxy.lock().unwrap().send_event(UserEvent::Menu(e));
+    }));
     pet::set_cell_px(load_cell_px());
 
     let now = Instant::now();
@@ -185,6 +209,9 @@ pub fn run(demo: bool, wait: bool) {
         renderer: Renderer::new(),
         areas: platform::work_areas(),
         areas_at: now,
+        floors: Vec::new(),
+        floors_at: now,
+        low_power: platform::low_power(),
         last_tick: now,
         last_pid_check: now,
         last_update_check: now,
@@ -429,7 +456,12 @@ impl App {
             window,
             press: None,
             shown: false,
+            last_frame: 0,
+            last_pos: (i32::MIN, i32::MIN),
         });
+        // Que el primer cuadro llegue ya y no simule el rato que el loop durmió.
+        self.floors_at = Instant::now() - FLOORS_EVERY;
+        self.last_tick = Instant::now() - FAST;
         Some(self.pets.len() - 1)
     }
 
@@ -544,8 +576,8 @@ impl App {
         }
     }
 
-    fn handle_menu(&mut self, el: &ActiveEventLoop) {
-        while let Ok(ev) = MenuEvent::receiver().try_recv() {
+    fn on_menu(&mut self, el: &ActiveEventLoop, ev: MenuEvent) {
+        {
             let Some(tray) = &self.tray else { return };
             if let Some(k) = tray.avatars.iter().position(|item| *item.id() == ev.id) {
                 self.choose_avatar(k.checked_sub(1));
@@ -574,27 +606,58 @@ impl App {
         }
     }
 
+    fn any_perched(&self) -> bool {
+        self.pets.iter().any(|pw| pw.pet.perched())
+    }
+
+    /// Cada cuánto hay que dibujar, según el monito más movido. None = no hay monitos.
+    fn frame_interval(&self) -> Option<Duration> {
+        let need = |pw: &PetWindow| {
+            let p = &pw.pet;
+            if pw.press.is_some() || matches!(p.mode, Mode::Dragged | Mode::Falling) {
+                FAST
+            } else if matches!(p.mode, Mode::Idle | Mode::Sitting) {
+                STILL
+            } else if p.mode == Mode::Sleeping {
+                ASLEEP
+            } else {
+                MOVING
+            }
+        };
+        let mut best = self.pets.iter().map(need).min()?;
+        // Estás arrastrando algo y hay un monito sobre una ventana: puede ser esa
+        // ventana, así que el monito tiene que seguirla con fluidez.
+        if self.any_perched() && platform::left_button_down() {
+            best = best.min(MOVING);
+        }
+        let best = if self.hidden { ASLEEP } else { best };
+        // En modo de bajo consumo, a lo más 30 por segundo y lo demás a la mitad.
+        Some(if self.low_power { (best * 2).max(MOVING) } else { best })
+    }
+
     fn tick(&mut self, el: &ActiveEventLoop, now: Instant) {
-        let dt = (now - self.last_tick).as_secs_f32().min(0.05);
+        // Tras un rato dormido el loop puede despertar con mucho dt: se simula
+        // en pasos cortos para no atravesar pisos.
+        let mut dt = (now - self.last_tick).as_secs_f32().min(0.5);
         self.last_tick = now;
 
         if now - self.areas_at > Duration::from_secs(2) {
             self.areas = platform::work_areas();
+            self.low_power = platform::low_power();
             self.areas_at = now;
         }
-        self.handle_menu(el);
 
         if self.watcher.is_none() && now - self.last_scan > Duration::from_secs(3) {
             self.last_scan = now;
             self.scan_sessions(el);
         }
 
-        // Sesiones que murieron sin mandar SessionEnd.
         if now - self.last_update_check > Duration::from_secs(6 * 60 * 60) {
             self.last_update_check = now;
             check_available(self.proxy.clone());
         }
 
+        // Sesiones que murieron sin mandar SessionEnd.
         if now - self.last_pid_check > Duration::from_secs(10) {
             self.last_pid_check = now;
             for pw in &mut self.pets {
@@ -603,17 +666,22 @@ impl App {
                 }
             }
         }
+        if self.pets.is_empty() {
+            self.floors.clear();
+            return;
+        }
 
         let cursor = platform::cursor_pos();
         let down = platform::left_button_down();
-        // Los bordes de arriba de las ventanas son plataformas; se recalculan cada
-        // cuadro para que los monitos sigan a una ventana que arrastras.
-        let floors = if self.pets.is_empty() {
-            Vec::new()
-        } else {
-            geom::floors(&platform::windows(), &self.areas, size())
-        };
-        let world = World { areas: &self.areas, floors: &floors, cursor };
+        // Los bordes de arriba de las ventanas son plataformas. Pedir la lista al
+        // sistema es lo más caro del cuadro: cada cuadro solo mientras arrastras
+        // (con el botón apretado) y algún monito está parado en una ventana, para
+        // que la siga; si no, cada FLOORS_EVERY.
+        if (down && self.any_perched()) || now - self.floors_at >= FLOORS_EVERY {
+            self.floors = geom::floors(&platform::windows(), &self.areas, size());
+            self.floors_at = now;
+        }
+        let world = World { areas: &self.areas, floors: &self.floors, cursor };
         for pw in &mut self.pets {
             drag(pw, cursor, down, now);
             let (px, py) = (pw.pet.x, pw.pet.y);
@@ -622,7 +690,13 @@ impl App {
                 && cursor.0 < px + size() - 8.0
                 && cursor.1 >= py + 8.0
                 && cursor.1 < py + size();
-            pw.pet.update(dt, &world);
+        }
+        while dt > 0.0 {
+            let step = dt.min(MAX_STEP);
+            dt -= step;
+            for pw in &mut self.pets {
+                pw.pet.update(step, &world);
+            }
         }
         for i in 0..self.pets.len() {
             for j in 0..self.pets.len() {
@@ -649,9 +723,18 @@ impl App {
             let pet = &pw.pet;
             let area = area_at(&self.areas, pet.x + size() / 2.0, pet.y + size() / 2.0);
             let room_above = pet.y - area.t > 50.0;
-            self.renderer.draw(pet, &pw.look, &mut pw.buf, room_above);
-            let (x, y) = ((pet.x - off()).round() as i32, (pet.y - off()).round() as i32);
-            pw.surface.present(&pw.window, &pw.buf, x, y);
+            // Solo se dibuja y se habla con el sistema de ventanas si algo cambió.
+            let pos = ((pet.x - off()).round() as i32, (pet.y - off()).round() as i32);
+            if pos != pw.last_pos {
+                pw.surface.move_to(&pw.window, pos.0, pos.1);
+                pw.last_pos = pos;
+            }
+            let frame = Renderer::visual_key(pet, room_above) ^ (pw.avatar as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            if frame != pw.last_frame {
+                self.renderer.draw(pet, &pw.look, &mut pw.buf, room_above);
+                pw.surface.present(&pw.window, &pw.buf);
+                pw.last_frame = frame;
+            }
             if !pw.shown {
                 pw.surface.show(&pw.window, true);
                 pw.shown = true;
@@ -725,6 +808,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Hook(v) => self.on_hook(el, v),
+            UserEvent::Menu(ev) => self.on_menu(el, ev),
             UserEvent::SessionsChanged => self.scan_sessions(el),
             UserEvent::Update(result) => self.on_update(el, result),
             UserEvent::Available(v) => self.on_available(v),
@@ -760,10 +844,12 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let now = Instant::now();
-        let frame = if self.pets.is_empty() { IDLE_FRAME } else { FRAME };
+        let frame = self.frame_interval().unwrap_or(EMPTY);
         if now >= self.last_tick + frame {
             self.tick(el, now);
         }
+        // Recalcula: el cuadro pudo crear, dormir o despertar monitos.
+        let frame = self.frame_interval().unwrap_or(EMPTY);
         el.set_control_flow(ControlFlow::WaitUntil(self.last_tick + frame));
     }
 }
