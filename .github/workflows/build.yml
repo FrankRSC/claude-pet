@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test
+
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/claude-pet \
+            target/aarch64-apple-darwin/release/claude-pet \
+            target/x86_64-apple-darwin/release/claude-pet
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release
+          mkdir dist
+          copy target\release\claude-pet.exe dist\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-pet-${{ runner.os }}
+          path: dist/
