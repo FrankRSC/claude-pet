@@ -1,0 +1,38 @@
+[package]
+name = "claude-pet"
+version = "0.1.0"
+edition = "2021"
+description = "Un monito de escritorio por cada sesión de Claude Code"
+
+[dependencies]
+winit = "0.30"
+fontdue = "0.9"
+serde_json = "1"
+notify-rust = "4"
+tray-icon = "0.21"
+dirs = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Console",
+    "Win32_System_Registry",
+    "Win32_Graphics_Dwm",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+core-graphics = "0.24"
+core-foundation = "0.10"
+foreign-types = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
