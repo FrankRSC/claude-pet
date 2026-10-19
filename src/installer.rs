@@ -53,6 +53,16 @@ impl Agent {
         }
     }
 
+    /// Para globos y avisos ("Codex terminó").
+    pub fn short(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Codex => "Codex",
+            Agent::Gemini => "Gemini",
+            Agent::OpenCode => "OpenCode",
+        }
+    }
+
     /// Nombres del proceso del agente, por prioridad. `node` y `bun` son el
     /// proceso real de los CLI en JavaScript cuando el ejecutable es un script.
     pub fn process_names(self) -> &'static [&'static str] {

@@ -81,6 +81,8 @@ pub enum Mode {
 pub struct Pet {
     pub session: String,
     pub label: String,
+    /// Quién manda los eventos: "Claude", "Codex", "Gemini", "OpenCode"…
+    pub agent: String,
     pub color: [u8; 3],
     pub pid: Option<u32>,
     pub x: f32,
@@ -128,12 +130,13 @@ pub fn fmt_duration(d: Duration) -> String {
 }
 
 impl Pet {
-    pub fn new(session: String, label: String, pid: Option<u32>, area: Rect, index: usize) -> Pet {
+    pub fn new(session: String, label: String, agent: String, pid: Option<u32>, area: Rect, index: usize) -> Pet {
         let h = hash(&session);
         // El primer monito es naranja Claude; los demás toman color por sesión.
         let color = if index == 0 { CLAUDE_ORANGE } else { PALETTE[(h % PALETTE.len() as u64) as usize] };
         let mut pet = Pet {
             session,
+            agent,
             color,
             pid,
             x: 0.0,
@@ -288,7 +291,7 @@ impl Pet {
     }
 
     pub fn on_click(&mut self) {
-        let text = format!("{} · {}", self.label, self.status());
+        let text = format!("{} · {} · {}", self.label, self.agent, self.status());
         self.say(text, 4.0);
         if self.mode == Mode::Sleeping {
             self.idle(1.0);
@@ -735,7 +738,7 @@ mod tests {
     }
 
     fn pet_at(x: f32, y: f32) -> Pet {
-        let mut p = Pet::new("t".into(), "t".into(), None, SCREEN, 0);
+        let mut p = Pet::new("t".into(), "t".into(), "Claude".into(), None, SCREEN, 0);
         p.bubble = None;
         p.x = x;
         p.y = y;

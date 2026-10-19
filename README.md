@@ -1,6 +1,6 @@
 # Claude Pet
 
-Un monito de escritorio por cada sesión activa de [Claude Code](https://claude.com/claude-code). Camina sobre la barra de tareas o el Dock, trepa las paredes, se sube a tus ventanas y celebra cuando Claude termina una tarea. Está escrito en Rust nativo, sin webview, y funciona en Windows y macOS.
+Un monito de escritorio por cada sesión activa de [Claude Code](https://claude.com/claude-code) (y también de Codex, Gemini CLI y OpenCode; ver [Agentes compatibles](#agentes-compatibles)). Camina sobre la barra de tareas o el Dock, trepa las paredes, se sube a tus ventanas y celebra cuando Claude termina una tarea. Está escrito en Rust nativo, sin webview, y funciona en Windows y macOS.
 
 ## Instalar
 
@@ -25,7 +25,7 @@ chmod +x claude-pet
 ./claude-pet install
 ```
 
-Con `install`, el binario se copia a `~/Library/Application Support/claude-pet/`, se registran los hooks en `~/.claude/settings.json` (con respaldo en `settings.json.bak`) y se agrega un LaunchAgent para que arranque al iniciar sesión.
+Con `install`, el binario se copia a `~/Library/Application Support/claude-pet/`, se registran los hooks en cada agente que encuentre instalado (Claude Code, Codex, Gemini CLI, OpenCode; ver [Agentes compatibles](#agentes-compatibles), con respaldo `.bak` de cada archivo que toca) y se agrega un LaunchAgent para que arranque al iniciar sesión.
 
 ### Windows
 
@@ -50,8 +50,9 @@ Se instala en `%LOCALAPPDATA%\claude-pet\` y arranca solo al iniciar sesión.
 ## Comandos
 
 ```
-claude-pet install [--no-autostart]   # instala hooks (y autoarranque)
-claude-pet uninstall                  # quita hooks y autoarranque
+claude-pet install [--no-autostart]   # instala hooks en cada agente (y autoarranque)
+claude-pet install --agent codex      # solo en uno: claude, codex, gemini u opencode
+claude-pet uninstall [--agent …]      # quita hooks y autoarranque
 claude-pet run --demo                 # abre la app con un monito de prueba
 claude-pet size <2-5>                 # tamaño en px por celda (3 = normal)
 claude-pet skins <skins.json>         # carga avatares (ver Avatares)
@@ -61,13 +62,13 @@ claude-pet quit
 
 ## Qué hace
 
-| Evento de Claude Code | Monito |
+| Evento (con los nombres de Claude Code) | Monito |
 |---|---|
 | SessionStart | aparece y cae desde arriba |
 | UserPromptSubmit | camina rápido con "…" (trabajando) |
 | Stop | salta, dice "¡Listo!" y lanza una notificación del sistema |
 | Notification | agita los brazos (permiso o atención) |
-| SessionEnd, o si el proceso de claude muere | se despide y desaparece |
+| SessionEnd, o si el proceso del agente muere | se despide y desaparece |
 
 **Contigo:**
 - **Clic:** globo con el proyecto y su estado.
@@ -81,6 +82,22 @@ claude-pet quit
 - **Bordes:** caminan sobre la barra de tareas o el Dock, trepan las paredes, andan por el techo y pasan de un monitor a otro.
 
 **Bandeja / barra de menú:** monito de prueba, Avatar, Tamaño, ocultar, notificaciones on/off, buscar actualización, salir. La configuración se guarda en `config.json` junto al binario instalado.
+
+## Agentes compatibles
+
+La app no sabe de ningún agente en particular: escucha cinco eventos por TCP local (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd`) y `claude-pet hook --agent <nombre>` traduce lo que manda cada CLI. `claude-pet install` registra los hooks en todos los que encuentre (por su carpeta de configuración); con `--agent` se limita a uno.
+
+| Agente | Dónde se instala | Eventos que se traducen |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | los cinco, tal cual |
+| Codex CLI | `~/.codex/hooks.json` | `PermissionRequest` → Notification |
+| Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` → UserPromptSubmit, `AfterAgent` → Stop |
+| OpenCode | plugin en `~/.config/opencode/plugins/claude-pet.ts` | `session.created`, `chat.message`, `session.idle`, `permission.asked`, `session.deleted` |
+
+- **Codex** no ejecuta hooks que no hayas aprobado: tras instalar, abre Codex y ejecuta `/hooks` para aprobar el de claude-pet. Si lo saltas no habrá monito ni ningún error visible. Si el comando cambia (por ejemplo, al reinstalar en otra ruta) hay que aprobarlo de nuevo.
+- **OpenCode** no tiene hooks de shell, así que va un plugin que recibe los eventos en proceso y ejecuta el binario. Ignora las sesiones de subagentes y el "idle" inicial de cada sesión (no es un "¡Listo!"), y manda el PID de OpenCode para que el monito se vaya cuando lo cierres.
+- **Otros CLI con hooks** (Cursor, Copilot, Kiro…): configura a mano un hook de tipo comando que ejecute `"/ruta/claude-pet" hook --agent <nombre>` con el JSON del evento por stdin (`hook_event_name`, `session_id`, `cwd`). Los nombres de evento que no se reconocen pasan tal cual, así que sirve cualquiera que coincida con los cinco de arriba.
+- El monito muestra el agente en el globo al hacer clic y en los avisos ("Codex terminó"). Para ver qué llega, `CLAUDE_PET_DEBUG=1` escribe cada evento en `claude-pet.log`.
 
 ## Avatares
 
@@ -183,8 +200,9 @@ src/geom.rs         áreas de pantalla y plataformas (bordes de ventanas)
 src/render.rs       dibujo del sprite y los globos (buffer ARGB)
 src/sprites.rs      el Monito, y las poses y el contorno de cada avatar
 src/skins.rs        carga y valida skins.json (avatares en tiempo de ejecución)
-src/hook_client.rs  `claude-pet hook`, lo que ejecuta Claude Code
-src/installer.rs    install/uninstall de hooks
+src/hook_client.rs  `claude-pet hook --agent …`: traduce el evento del agente y lo manda a la app
+src/installer.rs    install/uninstall de hooks por agente
+assets/opencode/    plugin de OpenCode (se copia con la ruta del binario)
 src/platform/       Windows (layered windows, Win32) y macOS (AppKit/CoreGraphics)
 ```
 

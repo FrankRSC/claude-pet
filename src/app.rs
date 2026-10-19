@@ -16,7 +16,7 @@ use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
-use crate::{ipc, skins, sprites, updater};
+use crate::{installer, ipc, skins, sprites, updater};
 
 /// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
 /// arrastras necesita 60; el sprite se anima a 4 por segundo.
@@ -287,9 +287,21 @@ fn check_available(proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-fn label_from_cwd(cwd: &str) -> String {
+/// Nombre de la carpeta del proyecto; sin carpeta, el nombre del agente.
+fn label_from_cwd(cwd: &str, agent: &str) -> String {
     let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
-    if name.is_empty() { "Claude".into() } else { name.into() }
+    if name.is_empty() { agent.into() } else { name.into() }
+}
+
+/// "codex" → "Codex". Un agente que no conocemos se muestra con mayúscula.
+fn agent_display(name: &str) -> String {
+    match installer::Agent::from_name(name) {
+        Some(a) => a.short().into(),
+        None => {
+            let mut c = name.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        }
+    }
 }
 
 fn notify(summary: String, body: String) {
@@ -463,7 +475,14 @@ impl App {
         self.reassign_avatars();
     }
 
-    fn spawn_pet(&mut self, el: &ActiveEventLoop, session: String, label: String, pid: Option<u32>) -> Option<usize> {
+    fn spawn_pet(
+        &mut self,
+        el: &ActiveEventLoop,
+        session: String,
+        label: String,
+        agent: String,
+        pid: Option<u32>,
+    ) -> Option<usize> {
         let attrs = Window::default_attributes()
             .with_title("Claude Pet")
             .with_decorations(false)
@@ -478,7 +497,7 @@ impl App {
         let (cx, cy) = platform::cursor_pos();
         let area = area_at(&self.areas, cx, cy);
         let avatar = self.pick_avatar(&session, &label);
-        let pet = Pet::new(session, label, pid, area, self.pets.len());
+        let pet = Pet::new(session, label, agent, pid, area, self.pets.len());
         let look = sprites::look(avatar, pet.color);
         self.pets.push(PetWindow {
             pet,
@@ -530,15 +549,18 @@ impl App {
         let event = v["hook_event_name"].as_str().unwrap_or("");
         let Some(session) = v["session_id"].as_str().filter(|s| !s.is_empty()) else { return };
         let pid = v["pet_pid"].as_u64().map(|p| p as u32);
+        // Los hooks de versiones anteriores no mandan "agent": son de Claude Code.
+        let agent = agent_display(v["agent"].as_str().unwrap_or("claude"));
+        debug_log(format_args!("hook {agent} {event} {session} pid={pid:?}"));
 
         let idx = match self.pets.iter().position(|p| p.pet.session == session) {
             Some(i) => i,
             None if event == "SessionEnd" => return,
             None => {
                 self.scanned.insert(session.to_string());
-                debug_log(format_args!("monito nuevo: {session} ({event})"));
-                let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""));
-                match self.spawn_pet(el, session.to_string(), label, pid) {
+                debug_log(format_args!("monito nuevo: {session} ({agent}, {event})"));
+                let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""), &agent);
+                match self.spawn_pet(el, session.to_string(), label, agent, pid) {
                     Some(i) => i,
                     None => return,
                 }
@@ -558,11 +580,12 @@ impl App {
                         Some(d) => format!("{} terminó en {}", pet.label, fmt_duration(d)),
                         None => format!("{} terminó", pet.label),
                     };
-                    notify("✅ Claude terminó".into(), body);
+                    notify(format!("✅ {} terminó", pet.agent), body);
                 }
             }
             "Notification" => {
-                let msg = v["message"].as_str().unwrap_or("Claude necesita tu atención");
+                let fallback = format!("{} necesita tu atención", pet.agent);
+                let msg = v["message"].as_str().unwrap_or(&fallback);
                 if msg.to_lowercase().contains("waiting for your input") {
                     pet.on_waiting();
                 } else {
