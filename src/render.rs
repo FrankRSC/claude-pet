@@ -175,7 +175,8 @@ impl Renderer {
             let dot = (c * 3 / 2).max(4);
             for i in 0..3 {
                 let a = if i == active { 1.0 } else { 0.35 };
-                fill(buf, base + c * 4 + i * c * 3, base - c, dot, dot, look.accent, a * pet.alpha);
+                let x0 = base + c * (GRID as i32 / 2 - 4) + i * c * 3;
+                fill(buf, x0, base - c, dot, dot, look.accent, a * pet.alpha);
             }
         } else if pet.mode == Mode::Sleeping {
             let bob = (pet.anim * 2.0).sin() * 3.0;

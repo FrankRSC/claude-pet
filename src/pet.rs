@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::geom::{area_at, in_any, Floor, Rect};
 
-/// Píxeles por celda del sprite de 16×16 (ajustable desde la bandeja).
-static CELL_PX: AtomicU32 = AtomicU32::new(5);
-pub const MIN_CELL: u32 = 3;
-pub const MAX_CELL: u32 = 8;
+/// Píxeles por celda del sprite de GRID×GRID (ajustable desde la bandeja).
+static CELL_PX: AtomicU32 = AtomicU32::new(DEFAULT_CELL);
+pub const MIN_CELL: u32 = 2;
+pub const DEFAULT_CELL: u32 = 3;
+pub const MAX_CELL: u32 = 5;
 
 pub fn cell_px() -> u32 {
     CELL_PX.load(Ordering::Relaxed)

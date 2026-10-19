@@ -1,303 +1,287 @@
-//! Avatares extra. Cada uno es un sprite de 16×16 con su paleta; las filas de
-//! 8 caracteres se reflejan (sprite simétrico) y las de 16 se usan tal cual.
-//! Las poses y el contorno se generan en `sprites::build`.
+//! Avatares cargados en tiempo de ejecución desde `skins.json` (lo genera
+//! `tools/pokedex.py`, o se escribe a mano). El Monito dibujado a mano vive en
+//! `sprites.rs` y siempre es el avatar 0; estos van después, en el orden del
+//! archivo. Las poses y el contorno se generan en `sprites::build`.
+//!
+//! Formato del archivo:
+//!
+//! ```json
+//! {
+//!   "grid": 24,
+//!   "skins": [
+//!     {
+//!       "id": 25,
+//!       "name": "Pikachu",
+//!       "rows": ["........................", "..."],
+//!       "palette": { "a": [250, 210, 40], "b": [34, 24, 30] },
+//!       "eyes": [[9, 7], [9, 8], [14, 7], [14, 8]]
+//!     }
+//!   ]
+//! }
+//! ```
+//!
+//! `grid` es el lado de la rejilla de las filas (si es menor que `GRID`, se
+//! centra y se alinea al suelo). Una fila con la mitad de caracteres se refleja.
+//! `eyes` son celdas (x, y) que se cierran al parpadear o dormir; también se
+//! acepta `"eye": "b"` para marcar como ojo todas las celdas de un carácter.
 
-use crate::sprites::Color;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
+use serde_json::Value;
+
+use crate::sprites::{Color, GRID};
 
 pub struct Skin {
-    pub name: &'static str,
-    pub rows: [&'static str; 16],
-    pub palette: &'static [(u8, Color)],
-    /// Carácter de los ojos, para poder cerrarlos al parpadear o dormir.
-    pub eye: u8,
+    /// Número de Pokédex (o el que ponga el archivo); agrupa el menú por generación.
+    pub id: Option<u32>,
+    pub name: String,
+    /// `GRID` filas de `GRID` bytes; `.` es transparente.
+    pub rows: Vec<Vec<u8>>,
+    pub palette: Vec<(u8, Color)>,
+    /// Celdas (x, y) de los ojos.
+    pub eyes: Vec<(usize, usize)>,
 }
 
-const K: (u8, Color) = (b'k', [34, 24, 30]);
-const W: (u8, Color) = (b'w', [245, 245, 245]);
-const SKIN: (u8, Color) = (b's', [250, 210, 170]);
+static SKINS: RwLock<Vec<Skin>> = RwLock::new(Vec::new());
 
-const FLAME: [&str; 16] = [
-    "........",
-    "....r...",
-    "...rr..r",
-    "..rrrrrr",
-    "..rroorr",
-    ".rrooooo",
-    ".rooyyyy",
-    ".rooyyyy",
-    ".roykyyy",
-    ".roykyyy",
-    ".rooyyyy",
-    ".rooyyyk",
-    "..rooyyy",
-    "..rroooo",
-    "...rrooo",
-    ".....rrr",
+/// Rangos de la Pokédex nacional por generación.
+const GENERATIONS: [(u32, u32); 9] = [
+    (1, 151),
+    (152, 251),
+    (252, 386),
+    (387, 493),
+    (494, 649),
+    (650, 721),
+    (722, 809),
+    (810, 905),
+    (906, 1025),
 ];
 
-pub const SKINS: &[Skin] = &[
-    Skin {
-        name: "Gato",
-        rows: [
-            "........", "........", "..g.....", "..gg....", "..gpgggg", "..gggggg", "..ggkggg", "..ggkggg",
-            "..wggggp", "...ggggg", "...gwwww", "...gwwww", "...gwwww", "...ggggg", "...gg...", "...ww...",
-        ],
-        palette: &[(b'g', [150, 150, 165]), (b'p', [240, 150, 170]), W, K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Perro",
-        rows: [
-            "........", "........", "..o.....", "..oo....", "..owoooo", "..oooooo", "..ookooo", "..ookoow",
-            "..oowwww", "...owwwk", "...owwww", "...owwww", "...ooooo", "...ooooo", "...oo...", "...ww...",
-        ],
-        palette: &[(b'o', [220, 135, 60]), W, K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Robot",
-        rows: [
-            "........", ".......g", ".......b", "...wwwww", "..wwwwww", "..wddddd", "..wddbdd", "..wddbdd",
-            "..wwwwww", "...wwwww", "..gwwwbb", "..gwwwww", "...wwwww", "...ggggg", "...ww...", "...gg...",
-        ],
-        palette: &[(b'w', [230, 236, 248]), (b'g', [150, 160, 180]), (b'd', [30, 40, 70]), (b'b', [90, 190, 255])],
-        eye: b'b',
-    },
-    Skin {
-        name: "Fantasma",
-        rows: [
-            "........", "........", "........", ".....www", "....wwww", "...wwwww", "...wwkww", "...wwkww",
-            "..wwwwww", "..wwwwww", "..wwwwww", "..wwwwww", "..wwwwww", "..wwwwww", "..ssssss", "..ss.ss.",
-        ],
-        palette: &[(b'w', [245, 245, 252]), (b's', [200, 205, 228]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Alien",
-        rows: [
-            "........", "........", "...ggggg", "..gggggg", ".ggggggg", ".ggkkggg", ".gggkkgg", "..gggggg",
-            "...ggggg", "....gggg", "...ggggg", "..dggggg", "..dggggg", "...ggggg", "...gg...", "...gg...",
-        ],
-        palette: &[(b'g', [120, 215, 85]), (b'd', [65, 150, 55]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Panda",
-        rows: [
-            "........", "........", "..bb....", "..bbwwww", "..wwwwww", "..wbbbww", "..wbebww", "..wbbbww",
-            "..wwwwwb", "...wwwww", "..bbwwww", "..bbwwww", "...wwwww", "...wwwww", "...bb...", "...bb...",
-        ],
-        palette: &[W, (b'b', [40, 40, 48]), (b'e', [250, 250, 250])],
-        eye: b'e',
-    },
-    Skin {
-        name: "Pingüino",
-        rows: [
-            "........", "........", "....bbbb", "...bbbbb", "..bbbbbb", "..bbwwww", "..bwkwww", "..bwkwwo",
-            "..bwwwww", "..bbwwww", ".bbwwwww", ".bbwwwww", "..bwwwww", "..bbwwww", "...oo...", "..ooo...",
-        ],
-        palette: &[(b'b', [45, 52, 78]), W, (b'o', [245, 160, 40]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Zorro",
-        rows: [
-            "........", "........", "..o.....", "..oo....", "..owoooo", "..oooooo", "..ookooo", "..ookooo",
-            "..owwwww", "...wwwwk", "...owwww", "...owwww", "...ooooo", "...ooooo", "...dd...", "...dd...",
-        ],
-        palette: &[(b'o', [238, 112, 40]), (b'd', [80, 45, 35]), W, K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Conejo",
-        rows: [
-            "...ww...", "...wp...", "...wp...", "...ww...", "..wwwwww", "..wwwwww", "..wwkwww", "..wwkwww",
-            "..pwwwwp", "...wwwww", "...wwwww", "..wwwwww", "..wwwwww", "...wwwww", "...ww...", "...ww...",
-        ],
-        palette: &[(b'w', [248, 244, 248]), (b'p', [245, 160, 185]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Dinosaurio",
-        rows: [
-            "................",
-            "................",
-            "........ggggggg.",
-            ".......ggggggggg",
-            ".......ggkgggggg",
-            ".......ggkgggggg",
-            "......dggggggggg",
-            ".....dggggggg...",
-            "....dggggggg....",
-            "...dgggyyyg.gg..",
-            "..dggggyyyg.....",
-            ".gggggggyyg.....",
-            "gg.gggggggg.....",
-            "....gggggg......",
-            "....gg..gg......",
-            "....gg..gg......",
-        ],
-        palette: &[(b'g', [85, 195, 75]), (b'd', [40, 125, 45]), (b'y', [240, 222, 120]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Nube",
-        rows: [
-            "........", "........", "........", "........", "........", ".....www", "...wwwww", "..wwwwww",
-            ".wwwwwww", ".wwwkwww", "wwwwkwww", "wwpwwwwk", "wwwwwwww", "wwwwwwww", ".ccccccc", "..cccc..",
-        ],
-        palette: &[(b'w', [248, 250, 255]), (b'c', [185, 212, 245]), (b'p', [250, 175, 195]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Esqueleto",
-        rows: [
-            "........", "........", "...wwwww", "..wwwwww", "..wwwwww", "..wkkwww", "..wkkwww", "..wwwwwk",
-            "...wwwww", "...wkwkw", "......ww", "..w.wwww", "..w.wkwk", "....wwww", "....w...", "...ww...",
-        ],
-        palette: &[(b'w', [236, 236, 224]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Bruja",
-        rows: [
-            ".......p", "......pp", ".....ppp", "....pppp", "...yyyyy", ".ppppppp", "..hsssss", "..hsksss",
-            "..hsksss", "...sssss", "..rrrrrr", ".srrrrrr", "..rrrrrr", "..rrrrrr", "...kk...", "...kk...",
-        ],
-        palette: &[
-            (b'p', [110, 60, 170]),
-            (b'y', [245, 205, 60]),
-            (b'h', [70, 45, 90]),
-            (b'r', [140, 85, 210]),
-            SKIN,
-            K,
-        ],
-        eye: b'k',
-    },
-    Skin {
-        name: "Fuego",
-        rows: FLAME,
-        palette: &[(b'r', [230, 60, 30]), (b'o', [250, 145, 30]), (b'y', [255, 222, 90]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Planta",
-        rows: [
-            "..gg....", ".gggg...", "..gggg.d", ".......d", "...sssss", "..ssssss", "..ssksss", "..ssksss",
-            "..psssss", "...sssss", "...sssss", "..ssssss", "..ssssss", "...sssss", "...bb...", "...bb...",
-        ],
-        palette: &[
-            (b'g', [95, 195, 75]),
-            (b'd', [55, 135, 55]),
-            (b's', [242, 218, 165]),
-            (b'b', [180, 130, 80]),
-            (b'p', [245, 165, 170]),
-            K,
-        ],
-        eye: b'k',
-    },
-    Skin {
-        name: "Hielo",
-        rows: [
-            ".......c", "......cc", ".....ccc", "....wccc", "...wcccc", "..wccccc", "..cckccc", "..cckccc",
-            "..cccccc", "..bccccc", "...bcccc", "...bbccc", "....bbcc", "....bbbb", "....bb..", "....bb..",
-        ],
-        palette: &[(b'c', [165, 222, 255]), (b'b', [80, 160, 240]), (b'w', [240, 250, 255]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Roca",
-        rows: [
-            "........", "........", "...ggggg", "..glgggg", "..gggggg", "..gggggg", "..ggkggg", "..ggkggg",
-            "..gggddd", "..dggggg", ".ggggggg", ".glggggg", ".ggggggg", "..dggggg", "..ddd...", "..ddd...",
-        ],
-        palette: &[(b'g', [145, 145, 150]), (b'd', [95, 95, 102]), (b'l', [190, 190, 195]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Ninja",
-        rows: [
-            "........", "........", "...bbbbb", "..bbbbbb", ".rrrrrrr", "..bbbbbb", "..bsesss", "..bsesss",
-            "..bbbbbb", "...bbbbb", "..bbbbbb", ".sbbbbbb", "..rrrrrr", "..bbbbbb", "...bb...", "...bb...",
-        ],
-        palette: &[(b'b', [58, 60, 80]), (b'r', [220, 45, 45]), (b'e', [20, 18, 24]), SKIN],
-        eye: b'e',
-    },
-    Skin {
-        name: "Vaquero",
-        rows: [
-            "........", "....hhhh", "...hhhhh", "...HHHHH", "hhhhhhhh", "..ssssss", "..ssksss", "..ssksss",
-            "..ssssss", "...rrrrr", "..bbbbbb", ".sbbbbbb", "..HHHHHH", "..cccccc", "...cc...", "...HH...",
-        ],
-        palette: &[
-            (b'h', [160, 105, 55]),
-            (b'H', [90, 55, 30]),
-            (b'r', [215, 55, 45]),
-            (b'b', [220, 150, 70]),
-            (b'c', [65, 95, 165]),
-            SKIN,
-            K,
-        ],
-        eye: b'k',
-    },
-    Skin {
-        name: "Astronauta",
-        rows: [
-            "........", "........", "...wwwww", "..wwwwww", ".wwvvvvv", ".wvbvvvv", ".wvvevvv", ".wvvevvv",
-            ".wwvvvvv", "..wwwwww", "..gwwwww", ".wwwwwwb", "..wwwwww", "..gggggg", "...ww...", "...gg...",
-        ],
-        palette: &[
-            (b'w', [240, 240, 246]),
-            (b'g', [165, 172, 190]),
-            (b'v', [35, 55, 125]),
-            (b'b', [120, 185, 255]),
-            (b'e', [225, 240, 255]),
-        ],
-        eye: b'e',
-    },
-    Skin {
-        name: "Fantasma de fuego",
-        rows: FLAME,
-        palette: &[(b'r', [85, 60, 215]), (b'o', [95, 145, 255]), (b'y', [185, 218, 255]), K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Tiburón",
-        rows: [
-            "................",
-            "................",
-            "................",
-            "................",
-            "........d.......",
-            ".......dd.......",
-            "d......bbbbbb...",
-            "dd...bbbbbbbbbb.",
-            "ddbbbbbbbbbbkbbb",
-            "ddbbbbbbbbbbbbbb",
-            "dd.bbbbwwwkwkwkw",
-            "d..bwwwwwwwwwww.",
-            "....wwwwwwwwww..",
-            ".....bd...bd....",
-            ".....dd...dd....",
-            ".....dd...dd....",
-        ],
-        palette: &[(b'b', [75, 145, 225]), (b'd', [45, 95, 165]), W, K],
-        eye: b'k',
-    },
-    Skin {
-        name: "Mago",
-        rows: [
-            ".......B", "......BB", ".....BBB", "....ByBB", "...BBBBB", ".BBBBBBB", "..ssssss", "..ssksss",
-            "..wsksss", "..wwwwww", "..rwwwww", ".srrwwww", "..rrrrww", "..rrrrrr", "..rrrrrr", "..rrrrrr",
-        ],
-        palette: &[
-            (b'B', [45, 75, 190]),
-            (b'y', [250, 220, 80]),
-            (b'r', [65, 100, 215]),
-            (b'w', [240, 240, 240]),
-            SKIN,
-            K,
-        ],
-        eye: b'k',
-    },
-];
+pub fn generation(id: u32) -> Option<u32> {
+    GENERATIONS.iter().position(|(a, b)| (*a..=*b).contains(&id)).map(|i| i as u32 + 1)
+}
+
+/// Donde la app busca los avatares: junto a `config.json`.
+pub fn path() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("claude-pet").join("skins.json"))
+}
+
+/// Lo que haya cargado, bajo un candado de lectura.
+pub fn with<R>(f: impl FnOnce(&[Skin]) -> R) -> R {
+    f(&SKINS.read().unwrap())
+}
+
+/// Vuelve a leer `skins.json` (si existe) y reemplaza la lista. Devuelve
+/// cuántos avatares quedaron; los inválidos se saltan con una línea en el log.
+pub fn reload() -> usize {
+    let loaded = match path().filter(|p| p.exists()) {
+        Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| parse(&t)) {
+            Ok((skins, errors)) => {
+                for e in errors {
+                    crate::app::debug_log(format_args!("skins.json: {e}"));
+                }
+                skins
+            }
+            Err(e) => {
+                crate::app::debug_log(format_args!("skins.json: {e}"));
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let n = loaded.len();
+    *SKINS.write().unwrap() = loaded;
+    n
+}
+
+/// Parsea y valida el archivo. Err si el archivo entero no sirve; si no,
+/// los avatares válidos y un mensaje por cada uno que se descartó.
+pub fn parse(text: &str) -> Result<(Vec<Skin>, Vec<String>), String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("no es JSON válido: {e}"))?;
+    let grid = match v.get("grid") {
+        None => GRID,
+        Some(g) => g.as_u64().map(|g| g as usize).filter(|g| (1..=GRID).contains(g)).ok_or_else(|| {
+            format!("\"grid\" debe ser un entero entre 1 y {GRID} (esta versión dibuja a {GRID}×{GRID})")
+        })?,
+    };
+    let list = v["skins"].as_array().ok_or("falta la lista \"skins\"")?;
+    let mut skins = Vec::new();
+    let mut errors = Vec::new();
+    for (i, item) in list.iter().enumerate() {
+        match parse_skin(item, grid) {
+            Ok(s) => skins.push(s),
+            Err(e) => {
+                let who = item["name"].as_str().map_or_else(|| format!("#{i}"), str::to_string);
+                errors.push(format!("{who}: {e}"));
+            }
+        }
+    }
+    Ok((skins, errors))
+}
+
+fn parse_skin(v: &Value, grid: usize) -> Result<Skin, String> {
+    let name = v["name"].as_str().filter(|n| !n.trim().is_empty()).ok_or("sin \"name\"")?.to_string();
+    let id = v["id"].as_u64().map(|n| n as u32);
+
+    let mut palette: Vec<(u8, Color)> = Vec::new();
+    let entries = v["palette"].as_object().ok_or("\"palette\" debe ser un objeto { carácter: [r, g, b] }")?;
+    for (key, rgb) in entries {
+        let &[k] = key.as_bytes() else { return Err(format!("clave de paleta '{key}': debe ser un solo carácter ASCII")) };
+        if k == b'.' {
+            return Err("'.' es el transparente; no puede estar en la paleta".into());
+        }
+        let c: Vec<u8> = rgb
+            .as_array()
+            .filter(|a| a.len() == 3)
+            .and_then(|a| a.iter().map(|x| x.as_u64().filter(|&n| n < 256).map(|n| n as u8)).collect())
+            .ok_or_else(|| format!("color de '{key}': debe ser [r, g, b]"))?;
+        palette.push((k, [c[0], c[1], c[2]]));
+    }
+    if palette.is_empty() {
+        return Err("paleta vacía".into());
+    }
+
+    let src = v["rows"].as_array().ok_or("\"rows\" debe ser una lista de cadenas")?;
+    if src.len() != grid {
+        return Err(format!("{} filas; deben ser {grid}", src.len()));
+    }
+    let (ox, oy) = ((GRID - grid) / 2, GRID - grid);
+    let mut rows = vec![vec![b'.'; GRID]; GRID];
+    for (y, row) in src.iter().enumerate() {
+        let row = row.as_str().ok_or_else(|| format!("fila {y}: no es una cadena"))?.as_bytes();
+        let full: Vec<u8> = if row.len() == grid {
+            row.to_vec()
+        } else if grid % 2 == 0 && row.len() == grid / 2 {
+            row.iter().chain(row.iter().rev()).copied().collect()
+        } else {
+            return Err(format!("fila {y}: {} caracteres; deben ser {grid}", row.len()));
+        };
+        for (x, &c) in full.iter().enumerate() {
+            if c != b'.' && !palette.iter().any(|(k, _)| *k == c) {
+                return Err(format!("fila {y}: '{}' no está en la paleta", c as char));
+            }
+            rows[oy + y][ox + x] = c;
+        }
+    }
+
+    let mut eyes = Vec::new();
+    if let Some(list) = v["eyes"].as_array() {
+        for cell in list {
+            let xy: Vec<usize> = cell
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .and_then(|a| a.iter().map(|n| n.as_u64().map(|n| n as usize)).collect())
+                .filter(|xy: &Vec<usize>| xy[0] < grid && xy[1] < grid)
+                .ok_or_else(|| format!("ojo {cell}: debe ser [x, y] dentro de la rejilla"))?;
+            eyes.push((ox + xy[0], oy + xy[1]));
+        }
+    }
+    if let Some(ch) = v["eye"].as_str() {
+        let &[k] = ch.as_bytes() else { return Err(format!("\"eye\" '{ch}': debe ser un solo carácter")) };
+        for (y, row) in rows.iter().enumerate() {
+            for (x, &c) in row.iter().enumerate() {
+                if c == k && !eyes.contains(&(x, y)) {
+                    eyes.push((x, y));
+                }
+            }
+        }
+    }
+    Ok(Skin { id, name, rows, palette, eyes })
+}
+
+/// `claude-pet skins <archivo>`: valida, copia a la carpeta de datos y pide a
+/// la app que recargue.
+pub fn install(src: &Path) {
+    let text = match std::fs::read_to_string(src) {
+        Ok(t) => t,
+        Err(e) => return eprintln!("No pude leer {}: {e}", src.display()),
+    };
+    let (skins, errors) = match parse(&text) {
+        Ok(r) => r,
+        Err(e) => return eprintln!("{}: {e}", src.display()),
+    };
+    for e in &errors {
+        eprintln!("  se omite {e}");
+    }
+    let Some(dst) = path() else { return eprintln!("No encuentro la carpeta de datos") };
+    if let Some(dir) = dst.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&dst, &text) {
+        return eprintln!("No pude escribir {}: {e}", dst.display());
+    }
+    println!("{} avatares en {}", skins.len(), dst.display());
+    let msg = serde_json::json!({ "cmd": "reload" });
+    if crate::ipc::send(&msg, std::time::Duration::from_millis(500)) {
+        println!("Claude Pet ya los tiene; están en el menú Avatar.");
+    } else {
+        println!("Claude Pet no está corriendo; los cargará al arrancar.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{
+        "grid": 4,
+        "skins": [
+            { "id": 25, "name": "Par", "rows": ["..", ".a", "ab", "bb"], "palette": {"a": [1, 2, 3], "b": [4, 5, 6]}, "eyes": [[1, 1]] },
+            { "name": "Ojo por carácter", "rows": ["....", ".kk.", ".aa.", "aaaa"], "palette": {"a": [1, 2, 3], "k": [0, 0, 0]}, "eye": "k" },
+            { "name": "Fila corta", "rows": ["...", "....", "....", "...."], "palette": {"a": [1, 2, 3]} },
+            { "name": "Sin paleta", "rows": ["....", "....", "....", "..x."], "palette": {"a": [1, 2, 3]} },
+            { "rows": ["....", "....", "....", "...."], "palette": {"a": [1, 2, 3]} }
+        ]
+    }"#;
+
+    #[test]
+    fn pads_mirrors_and_validates() {
+        let (skins, errors) = parse(SAMPLE).unwrap();
+        assert_eq!(skins.len(), 2);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].starts_with("Fila corta:"));
+        assert!(errors[1].contains("'x' no está en la paleta"));
+        assert!(errors[2].starts_with("#4:"));
+
+        // 4×4 dentro de GRID: centrado y con los pies en la última fila.
+        let s = &skins[0];
+        let (ox, oy) = ((GRID - 4) / 2, GRID - 4);
+        assert_eq!(s.id, Some(25));
+        assert_eq!(s.rows.len(), GRID);
+        assert!(s.rows.iter().all(|r| r.len() == GRID));
+        assert_eq!(&s.rows[oy + 1][ox..ox + 4], b".aa.", "la fila de 2 se refleja");
+        assert_eq!(&s.rows[oy + 3][ox..ox + 4], b"bbbb");
+        assert_eq!(s.eyes, vec![(ox + 1, oy + 1)]);
+        assert_eq!(skins[1].eyes, vec![(ox + 1, oy + 1), (ox + 2, oy + 1)]);
+    }
+
+    #[test]
+    fn rejects_bad_files() {
+        assert!(parse("[]").is_err());
+        assert!(parse("{\"grid\": 99, \"skins\": []}").is_err());
+        assert!(parse("no json").is_err());
+        assert_eq!(parse("{\"skins\": []}").unwrap().0.len(), 0);
+    }
+
+    #[test]
+    fn generations() {
+        assert_eq!(generation(1), Some(1));
+        assert_eq!(generation(151), Some(1));
+        assert_eq!(generation(152), Some(2));
+        assert_eq!(generation(1025), Some(9));
+        assert_eq!(generation(0), None);
+        assert_eq!(generation(5000), None);
+    }
+
+    /// El skins.json instalado (si hay) debe cargar sin descartar nada.
+    #[test]
+    fn installed_file_is_well_formed() {
+        for p in [path(), Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/skins.json")))].into_iter().flatten() {
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let (skins, errors) = parse(&text).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            assert!(errors.is_empty(), "{}: {errors:?}", p.display());
+            assert!(!skins.is_empty(), "{}: sin avatares", p.display());
+        }
+    }
+}

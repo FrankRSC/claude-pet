@@ -1,13 +1,17 @@
-//! Pixel art del monito, 16×16. `O` cuerpo, `o` sombra, `k` ojos, `.` transparente.
-//! Los pies siempre tocan la fila 15. Aquí también se construyen las poses de
-//! los avatares de `skins.rs`.
+//! Sprites: la rejilla es de `GRID`×`GRID` celdas y los pies tocan la última
+//! fila. El Monito está dibujado a mano a 16×16 (`O` cuerpo, `o` sombra, `k`
+//! ojos, `.` transparente) y se centra en la rejilla; los demás avatares vienen
+//! de `skins.rs` y aquí se construyen sus poses.
 
-use crate::skins::{Skin, SKINS};
+use crate::skins::{self, Skin};
 
-pub const GRID: usize = 16;
-pub type Frame = [&'static str; GRID];
+pub const GRID: usize = 24;
 pub type Color = [u8; 3];
 pub type Grid = [[Option<Color>; GRID]; GRID];
+
+/// Lado del arte dibujado a mano del Monito.
+pub const ART: usize = 16;
+pub type Frame = [&'static str; ART];
 
 pub const STAND: Frame = [
     "................",
@@ -161,8 +165,8 @@ pub const SLEEP: Frame = [
     ".oooooooooooooo.",
 ];
 
-/// Color de cada celda, o None si es transparente.
-pub fn cell(frame: &Frame, x: usize, y: usize, base: [u8; 3]) -> Option<[u8; 3]> {
+/// Color de una celda del arte de 16×16, o None si es transparente.
+pub fn art_cell(frame: &Frame, x: usize, y: usize, base: Color) -> Option<Color> {
     let shade = |f: f32| base.map(|c| (c as f32 * f) as u8);
     match frame[y].as_bytes()[x] {
         b'O' => Some(base),
@@ -170,6 +174,16 @@ pub fn cell(frame: &Frame, x: usize, y: usize, base: [u8; 3]) -> Option<[u8; 3]>
         b'k' => Some([34, 24, 22]),
         _ => None,
     }
+}
+
+/// Lo mismo, en coordenadas de la rejilla: el arte va centrado y con los pies
+/// en la última fila.
+pub fn cell(frame: &Frame, x: usize, y: usize, base: Color) -> Option<Color> {
+    let (ox, oy) = ((GRID - ART) / 2, GRID - ART);
+    if x < ox || y < oy || x - ox >= ART {
+        return None;
+    }
+    art_cell(frame, x - ox, y - oy, base)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -200,23 +214,32 @@ impl Look {
     }
 }
 
-/// Número de avatares: el monito original más los de `skins.rs`.
+/// Número de avatares: el Monito más los cargados de `skins.json`.
 pub fn count() -> usize {
-    SKINS.len() + 1
+    skins::with(|s| s.len()) + 1
 }
 
-pub fn name(index: usize) -> &'static str {
+pub fn name(index: usize) -> String {
     match index {
-        0 => "Monito",
-        i => SKINS[i - 1].name,
+        0 => "Monito".into(),
+        i => skins::with(|s| s.get(i - 1).map_or_else(|| "?".into(), |k| k.name.clone())),
     }
 }
 
-/// El monito original se tiñe con el color de la sesión; los demás tienen paleta fija.
+/// Generación del Pokémon (por su número), para agrupar el menú. None para el
+/// Monito y los avatares sin `id`.
+pub fn generation(index: usize) -> Option<u32> {
+    match index {
+        0 => None,
+        i => skins::with(|s| s.get(i - 1).and_then(|k| k.id).and_then(skins::generation)),
+    }
+}
+
+/// El Monito se tiñe con el color de la sesión; los demás tienen paleta fija.
 pub fn look(index: usize, tint: Color) -> Look {
     match index % count() {
         0 => monito(tint),
-        i => build(&SKINS[i - 1]),
+        i => skins::with(|s| build(&s[i - 1])),
     }
 }
 
@@ -236,29 +259,23 @@ fn monito(tint: Color) -> Look {
     }
 }
 
-/// Filas de 8 se reflejan para formar 16; las de 16 se usan tal cual.
-fn expand(row: &str) -> Vec<u8> {
-    let b = row.as_bytes();
-    if b.len() == GRID / 2 {
-        b.iter().chain(b.iter().rev()).copied().collect()
-    } else {
-        b.to_vec()
-    }
-}
-
 fn build(skin: &Skin) -> Look {
     let mut base: Grid = [[None; GRID]; GRID];
     let mut eyes = [[false; GRID]; GRID];
     let mut counts: Vec<(Color, usize)> = Vec::new();
-    for (y, row) in skin.rows.iter().enumerate() {
-        for (x, &c) in expand(row).iter().enumerate().take(GRID) {
+    for (y, row) in skin.rows.iter().enumerate().take(GRID) {
+        for (x, &c) in row.iter().enumerate().take(GRID) {
             let Some(&(_, color)) = skin.palette.iter().find(|(k, _)| *k == c) else { continue };
             base[y][x] = Some(color);
-            eyes[y][x] = c == skin.eye;
             match counts.iter_mut().find(|(col, _)| *col == color) {
                 Some((_, n)) => *n += 1,
                 None => counts.push((color, 1)),
             }
+        }
+    }
+    for &(x, y) in &skin.eyes {
+        if x < GRID && y < GRID && base[y][x].is_some() {
+            eyes[y][x] = true;
         }
     }
     let closed = close_eyes(&base, &eyes);
@@ -278,18 +295,26 @@ fn build(skin: &Skin) -> Look {
     }
 }
 
-/// Ojos cerrados: donde hay dos celdas de ojo apiladas, la de arriba toma el
-/// color de su vecino y queda una rayita.
+/// Ojos cerrados: de cada columna de celdas de ojo queda solo la de abajo (una
+/// rayita); las demás, y los ojos de una sola celda, toman el color de al lado.
 fn close_eyes(g: &Grid, eyes: &[[bool; GRID]; GRID]) -> Grid {
     let mut out = *g;
-    for y in 0..GRID - 1 {
+    for y in 0..GRID {
         for x in 0..GRID {
-            if eyes[y][x] && eyes[y + 1][x] {
-                let neighbor = [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1))]
-                    .into_iter()
-                    .filter(|&(nx, ny)| nx < GRID && ny < GRID && !eyes[ny][nx])
-                    .find_map(|(nx, ny)| g[ny][nx]);
-                out[y][x] = neighbor;
+            if !eyes[y][x] {
+                continue;
+            }
+            let above = y > 0 && eyes[y - 1][x];
+            let below = y + 1 < GRID && eyes[y + 1][x];
+            if above && !below {
+                continue;
+            }
+            let neighbor = [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)]
+                .into_iter()
+                .filter(|&(nx, ny)| nx < GRID && ny < GRID && !eyes[ny][nx])
+                .find_map(|(nx, ny)| g[ny][nx]);
+            if let Some(c) = neighbor {
+                out[y][x] = Some(c);
             }
         }
     }
@@ -328,13 +353,13 @@ fn outline(g: Grid) -> Grid {
     out
 }
 
-/// Ícono RGBA de 32×32 para la bandeja.
+/// Ícono RGBA de 32×32 para la bandeja: el arte del Monito a 2×.
 pub fn icon_rgba() -> Vec<u8> {
-    const SIZE: usize = GRID * 2;
+    const SIZE: usize = ART * 2;
     let mut out = vec![0u8; SIZE * SIZE * 4];
     for y in 0..SIZE {
         for x in 0..SIZE {
-            if let Some([r, g, b]) = cell(&STAND, x / 2, y / 2, crate::pet::CLAUDE_ORANGE) {
+            if let Some([r, g, b]) = art_cell(&STAND, x / 2, y / 2, crate::pet::CLAUDE_ORANGE) {
                 let i = (y * SIZE + x) * 4;
                 out[i..i + 4].copy_from_slice(&[r, g, b, 255]);
             }
@@ -347,37 +372,72 @@ pub fn icon_rgba() -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn skins_are_well_formed() {
-        for skin in SKINS {
-            for (y, row) in skin.rows.iter().enumerate() {
-                assert!(
-                    row.len() == GRID || row.len() == GRID / 2,
-                    "{} fila {y}: {} caracteres",
-                    skin.name,
-                    row.len()
-                );
-                for c in row.bytes().filter(|&c| c != b'.') {
-                    assert!(
-                        skin.palette.iter().any(|(k, _)| *k == c),
-                        "{} fila {y}: '{}' no está en la paleta",
-                        skin.name,
-                        c as char
-                    );
-                }
-            }
+    fn skin(rows: &[&str], eyes: &[(usize, usize)]) -> Skin {
+        let (ox, oy) = ((GRID - rows.len()) / 2, GRID - rows.len());
+        let mut full = vec![vec![b'.'; GRID]; GRID];
+        for (y, r) in rows.iter().enumerate() {
+            full[oy + y][ox..ox + r.len()].copy_from_slice(r.as_bytes());
+        }
+        Skin {
+            id: None,
+            name: "t".into(),
+            rows: full,
+            palette: vec![(b'a', [200, 100, 50]), (b'k', [0, 0, 0])],
+            eyes: eyes.iter().map(|&(x, y)| (ox + x, oy + y)).collect(),
         }
     }
 
-    /// Escribe target/avatars.png con todas las poses de todos los avatares.
+    #[test]
+    fn monito_stands_on_the_last_row_centered() {
+        let look = monito(crate::pet::CLAUDE_ORANGE);
+        let stand = look.frame(Pose::Stand);
+        assert!(stand[GRID - 1].iter().any(Option::is_some), "pies en la última fila");
+        assert!(stand[GRID - ART - 1].iter().all(Option::is_none), "nada arriba del arte");
+        let left = stand.iter().flat_map(|r| r.iter().position(Option::is_some)).min().unwrap();
+        let right = stand.iter().flat_map(|r| r.iter().rposition(Option::is_some)).max().unwrap();
+        assert_eq!(left, GRID - 1 - right, "centrado");
+    }
+
+    #[test]
+    fn eyes_close_into_a_line() {
+        // Ojo de dos celdas: al cerrarlo queda la de abajo. Ojo de una: desaparece.
+        let s = skin(&["aaaa", "akak", "akaa", "aaaa"], &[(1, 1), (1, 2), (3, 1)]);
+        let look = build(&s);
+        let (ox, oy) = ((GRID - 4) / 2, GRID - 4);
+        let open = look.frame(Pose::Stand);
+        let closed = look.frame(Pose::Blink);
+        let body = Some([200, 100, 50]);
+        let dark = Some([0, 0, 0]);
+        assert_eq!(open[oy + 1][ox + 1], dark);
+        assert_eq!(closed[oy + 1][ox + 1], body, "arriba se cierra");
+        assert_eq!(closed[oy + 2][ox + 1], dark, "abajo queda la rayita");
+        assert_eq!(closed[oy + 1][ox + 3], body, "el ojo de una celda desaparece");
+        assert_eq!(look.accent, [200, 100, 50]);
+        // El contorno rodea el sprite.
+        assert_eq!(open[oy - 1][ox], Some(OUTLINE));
+        assert_eq!(open[oy][ox - 1], Some(OUTLINE));
+    }
+
+    #[test]
+    fn count_includes_monito_and_loaded_skins() {
+        assert!(count() >= 1);
+        assert_eq!(name(0), "Monito");
+        assert_eq!(generation(0), None);
+        let _ = look(0, [1, 2, 3]);
+    }
+
+    /// Escribe target/avatars.png con las poses de los primeros avatares y
+    /// target/avatars_big.png con la pose principal de todos, para verlos.
     #[test]
     fn preview_sheet() {
+        skins::reload();
         const SCALE: usize = 4;
         const PAD: usize = 8;
+        let shown = count().min(40);
         let cell_px = GRID * SCALE + PAD;
-        let (w, h) = (POSES * cell_px + PAD, count() * cell_px + PAD);
+        let (w, h) = (POSES * cell_px + PAD, shown * cell_px + PAD);
         let mut rgb = vec![[36u8, 38, 48]; w * h];
-        for i in 0..count() {
+        for i in 0..shown {
             let look = look(i, crate::pet::CLAUDE_ORANGE);
             for (p, frame) in look.frames.iter().enumerate() {
                 let (ox, oy) = (PAD + p * cell_px, PAD + i * cell_px);
@@ -392,9 +452,9 @@ mod tests {
         let png = encode_png(w, h, &rgb);
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/target/avatars.png"), png).unwrap();
 
-        // Pose principal en grande, 6 por fila.
-        const BIG: usize = 8;
-        const COLS: usize = 6;
+        // Pose principal en grande, 10 por fila.
+        const BIG: usize = 5;
+        const COLS: usize = 10;
         let cell_px = GRID * BIG + PAD;
         let rows = count().div_ceil(COLS);
         let (w, h) = (COLS * cell_px + PAD, rows * cell_px + PAD);

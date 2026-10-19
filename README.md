@@ -53,7 +53,8 @@ Se instala en `%LOCALAPPDATA%\claude-pet\` y arranca solo al iniciar sesión.
 claude-pet install [--no-autostart]   # instala hooks (y autoarranque)
 claude-pet uninstall                  # quita hooks y autoarranque
 claude-pet run --demo                 # abre la app con un monito de prueba
-claude-pet size <3-8>                 # tamaño en px por celda (5 = normal)
+claude-pet size <2-5>                 # tamaño en px por celda (3 = normal)
+claude-pet skins <skins.json>         # carga avatares (ver Avatares)
 claude-pet floors                     # diagnóstico: ventanas y plataformas detectadas
 claude-pet quit
 ```
@@ -83,9 +84,37 @@ claude-pet quit
 
 ## Avatares
 
-Hay 24: Monito, Gato, Perro, Robot, Fantasma, Alien, Panda, Pingüino, Zorro, Conejo, Dinosaurio, Nube, Esqueleto, Bruja, Fuego, Planta, Hielo, Roca, Ninja, Vaquero, Astronauta, Fantasma de fuego, Tiburón y Mago. Por defecto cada sesión recibe uno distinto.
+De fábrica solo viene el Monito. Los demás se cargan de un archivo `skins.json` en la carpeta de datos (`~/Library/Application Support/claude-pet/` en macOS, `%LOCALAPPDATA%\claude-pet\` en Windows), junto a `config.json`. Para instalar uno:
 
-Para agregar uno, añade un `Skin` en `src/skins.rs` con un sprite de 16×16 y su paleta. Una fila de 8 caracteres se refleja y queda simétrica. Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. `cargo test` revisa los sprites y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
+```sh
+claude-pet skins mi-archivo.json
+```
+
+Valida el archivo, lo copia ahí y, si la app está corriendo, recarga el menú Avatar sin reiniciar. Con más de 30 avatares el menú se agrupa por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto.
+
+El archivo lo genera `tools/pokedex.py` a partir de la Pokédex (ver abajo), pero también se puede escribir a mano:
+
+```json
+{
+  "grid": 24,
+  "skins": [
+    {
+      "id": 25,
+      "name": "Pikachu",
+      "rows": ["........................", "…23 filas más…"],
+      "palette": { "a": [250, 210, 40], "k": [34, 24, 30] },
+      "eyes": [[9, 7], [9, 8], [14, 7], [14, 8]]
+    }
+  ]
+}
+```
+
+- `rows`: `grid` filas de `grid` caracteres; `.` es transparente y los pies van en la última fila. Una fila con la mitad de caracteres se refleja (sprite simétrico). Si `grid` es menor que 24, el sprite se centra y se alinea al suelo.
+- `palette`: un color `[r, g, b]` por carácter.
+- `eyes` (opcional): celdas `[x, y]` que se cierran al parpadear y al dormir. También sirve `"eye": "k"` para marcar todas las celdas de un carácter.
+- `id` (opcional): número de Pokédex, solo para agrupar el menú.
+
+Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. Un avatar mal formado se omite (con `CLAUDE_PET_DEBUG=1` queda en el log) y no tumba la app. `cargo test` valida el `skins.json` instalado y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
 
 ## Actualizaciones
 
@@ -137,8 +166,8 @@ src/app.rs          event loop (winit), ventanas, bandeja, notificaciones
 src/pet.rs          física y máquina de estados
 src/geom.rs         áreas de pantalla y plataformas (bordes de ventanas)
 src/render.rs       dibujo del sprite y los globos (buffer ARGB)
-src/sprites.rs      poses y contorno generados a partir de los sprites
-src/skins.rs        los 23 avatares extra
+src/sprites.rs      el Monito, y las poses y el contorno de cada avatar
+src/skins.rs        carga y valida skins.json (avatares en tiempo de ejecución)
 src/hook_client.rs  `claude-pet hook`, lo que ejecuta Claude Code
 src/installer.rs    install/uninstall de hooks
 src/platform/       Windows (layered windows, Win32) y macOS (AppKit/CoreGraphics)

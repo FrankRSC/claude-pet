@@ -40,7 +40,20 @@ fn main() {
                         eprintln!("Claude Pet no está corriendo.");
                     }
                 }
-                _ => eprintln!("uso: claude-pet size <{}-{}>  (5 = normal)", pet::MIN_CELL, pet::MAX_CELL),
+                _ => eprintln!(
+                    "uso: claude-pet size <{}-{}>  ({} = normal)",
+                    pet::MIN_CELL,
+                    pet::MAX_CELL,
+                    pet::DEFAULT_CELL
+                ),
+            }
+        }
+        "skins" => {
+            // Instala un skins.json (el que genera tools/pokedex.py) y recarga la app.
+            platform::attach_console();
+            match args.get(2) {
+                Some(src) => skins::install(std::path::Path::new(src)),
+                None => eprintln!("uso: claude-pet skins <skins.json>  (lo genera tools/pokedex.py)"),
             }
         }
         "floors" => {
@@ -59,7 +72,7 @@ fn main() {
         _ => {
             platform::attach_console();
             eprintln!(
-                "uso: claude-pet [run [--demo] | hook | install [--no-autostart] | uninstall | quit]"
+                "uso: claude-pet [run [--demo] | hook | install [--no-autostart] | uninstall | skins <archivo.json> | size <n> | quit]"
             );
         }
     }

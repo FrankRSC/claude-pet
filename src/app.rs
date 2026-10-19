@@ -16,7 +16,7 @@ use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
-use crate::{ipc, sprites, updater};
+use crate::{ipc, skins, sprites, updater};
 
 /// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
 /// arrastras necesita 60; el sprite se anima a 4 por segundo.
@@ -114,14 +114,9 @@ fn config_path() -> Option<std::path::PathBuf> {
 }
 
 /// Tamaños del menú: (nombre, píxeles por celda).
-const SIZES: [(&str, u32); 6] = [
-    ("Chico", 3),
-    ("Mediano", 4),
-    ("Normal", 5),
-    ("Grande", 6),
-    ("Muy grande", 7),
-    ("Enorme", 8),
-];
+const SIZES: [(&str, u32); 4] = [("Chico", 2), ("Normal", 3), ("Grande", 4), ("Enorme", 5)];
+/// Con más avatares que esto, el menú Avatar se agrupa por generación.
+const GROUP_FROM: usize = 30;
 
 fn load_config() -> Value {
     config_path()
@@ -146,7 +141,7 @@ fn load_avatar_choice() -> Option<usize> {
 }
 
 fn save_avatar_choice(choice: Option<usize>) {
-    save_config("avatar", choice.map_or("aleatorio", sprites::name).into());
+    save_config("avatar", choice.map_or_else(|| "aleatorio".to_string(), sprites::name).into());
 }
 
 /// Avatar elegido a mano para cada proyecto (por nombre de carpeta).
@@ -166,7 +161,7 @@ fn save_project_avatar(label: &str, avatar: usize) {
 }
 
 fn load_cell_px() -> u32 {
-    load_config()["cell_px"].as_u64().map_or(5, |n| n as u32)
+    load_config()["cell_px"].as_u64().map_or(pet::DEFAULT_CELL, |n| n as u32)
 }
 
 /// `wait`: venimos de una actualización y la instancia anterior todavía está
@@ -202,6 +197,8 @@ pub fn run(demo: bool, wait: bool) {
         let _ = proxy.lock().unwrap().send_event(UserEvent::Menu(e));
     }));
     pet::set_cell_px(load_cell_px());
+    let n = skins::reload();
+    debug_log(format_args!("{n} avatares en skins.json"));
 
     let now = Instant::now();
     let mut app = App {
@@ -319,13 +316,32 @@ impl App {
         let quit = MenuItem::new("Salir", true, None);
         let avatar_menu = Submenu::new("Avatar", true);
         let mut avatars = vec![CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None)];
-        for i in 0..sprites::count() {
-            avatars.push(CheckMenuItem::new(sprites::name(i), true, self.avatar_choice == Some(i), None));
-        }
         let _ = avatar_menu.append(&avatars[0]);
         let _ = avatar_menu.append(&PredefinedMenuItem::separator());
-        for item in &avatars[1..] {
-            let _ = avatar_menu.append(item);
+        // Pocos avatares: lista plana. Una Pokédex entera: submenús por generación.
+        let n = sprites::count();
+        let mut gens: Vec<(u32, Submenu)> = Vec::new();
+        for i in 0..n {
+            let item = CheckMenuItem::new(sprites::name(i), true, self.avatar_choice == Some(i), None);
+            match sprites::generation(i).filter(|_| n > GROUP_FROM) {
+                None => {
+                    let _ = avatar_menu.append(&item);
+                }
+                Some(g) => {
+                    let k = match gens.iter().position(|(k, _)| *k == g) {
+                        Some(k) => k,
+                        None => {
+                            gens.push((g, Submenu::new(format!("Generación {g}"), true)));
+                            gens.len() - 1
+                        }
+                    };
+                    let _ = gens[k].1.append(&item);
+                }
+            }
+            avatars.push(item);
+        }
+        for (_, sub) in &gens {
+            let _ = avatar_menu.append(sub);
         }
         let size_menu = Submenu::new("Tamaño", true);
         let sizes: Vec<CheckMenuItem> = SIZES
@@ -421,13 +437,30 @@ impl App {
                 item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
             }
         }
-        // Reasignamos a todos, uno por uno, para que en modo aleatorio no se repitan.
+        self.reassign_avatars();
+    }
+
+    /// Reparte avatares de nuevo, uno por uno, para que en modo aleatorio no se repitan.
+    fn reassign_avatars(&mut self) {
         let pets = std::mem::take(&mut self.pets);
         for mut pw in pets {
             let avatar = self.pick_avatar(&pw.pet.session, &pw.pet.label);
             Self::set_avatar(&mut pw, avatar);
             self.pets.push(pw);
         }
+    }
+
+    /// `claude-pet skins` reemplazó skins.json: recargar, rehacer el menú y
+    /// volver a repartir avatares (los índices pudieron cambiar).
+    fn reload_skins(&mut self) {
+        let n = skins::reload();
+        debug_log(format_args!("skins.json recargado: {n} avatares"));
+        self.avatar_choice = load_avatar_choice();
+        if self.tray.is_some() {
+            self.tray = None;
+            self.build_tray();
+        }
+        self.reassign_avatars();
     }
 
     fn spawn_pet(&mut self, el: &ActiveEventLoop, session: String, label: String, pid: Option<u32>) -> Option<usize> {
@@ -485,6 +518,7 @@ impl App {
     fn on_hook(&mut self, el: &ActiveEventLoop, v: Value) {
         match v["cmd"].as_str() {
             Some("quit") => return el.exit(),
+            Some("reload") => return self.reload_skins(),
             Some("size") => {
                 if let Some(px) = v["px"].as_u64() {
                     self.choose_size((px as u32).clamp(pet::MIN_CELL, pet::MAX_CELL));
@@ -744,7 +778,7 @@ impl App {
 }
 
 /// Con CLAUDE_PET_DEBUG=1 escribe en %TEMP%\claude-pet.log.
-fn debug_log(msg: std::fmt::Arguments) {
+pub fn debug_log(msg: std::fmt::Arguments) {
     if std::env::var_os("CLAUDE_PET_DEBUG").is_none() {
         return;
     }
