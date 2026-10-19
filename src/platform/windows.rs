@@ -262,9 +262,9 @@ fn process_table() -> HashMap<u32, (u32, String)> {
     map
 }
 
-pub fn find_claude_pid() -> Option<u32> {
+pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
     let table = process_table();
-    super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned())
+    super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned(), names)
 }
 
 pub fn spawn_detached(exe: &Path, args: &[&str]) {

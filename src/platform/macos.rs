@@ -239,8 +239,8 @@ fn parent_of(pid: u32) -> Option<(u32, String)> {
     Some((info.pbi_ppid, name))
 }
 
-pub fn find_claude_pid() -> Option<u32> {
-    super::find_ancestor(std::process::id(), parent_of)
+pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
+    super::find_ancestor(std::process::id(), parent_of, names)
 }
 
 pub fn spawn_detached(exe: &Path, args: &[&str]) {

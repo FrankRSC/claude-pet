@@ -19,16 +19,18 @@ pub const PORT: u16 = 47823;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
+    let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     match args.get(1).map(String::as_str).unwrap_or("run") {
         "run" => app::run(has("--demo"), has("--wait")),
-        "hook" => hook_client::run(),
+        // Sin --agent es Claude Code (los hooks de versiones anteriores no lo mandan).
+        "hook" => hook_client::run(value("--agent").as_deref().unwrap_or("claude")),
         "install" => {
             platform::attach_console();
-            installer::install(!has("--no-autostart"));
+            installer::install(!has("--no-autostart"), value("--agent").as_deref().unwrap_or("all"));
         }
         "uninstall" => {
             platform::attach_console();
-            installer::uninstall();
+            installer::uninstall(value("--agent").as_deref().unwrap_or("all"));
         }
         "quit" => ipc::send_quit(),
         "size" => {
@@ -72,7 +74,7 @@ fn main() {
         _ => {
             platform::attach_console();
             eprintln!(
-                "uso: claude-pet [run [--demo] | hook | install [--no-autostart] | uninstall | skins <archivo.json> | size <n> | quit]"
+                "uso: claude-pet [run [--demo] | hook [--agent <nombre>] | install [--no-autostart] [--agent claude|codex|gemini|opencode|all] | uninstall [--agent …] | skins <archivo.json> | size <n> | quit]"
             );
         }
     }
