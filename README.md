@@ -116,6 +116,21 @@ El archivo lo genera `tools/pokedex.py` a partir de la Pokédex (ver abajo), per
 
 Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. Un avatar mal formado se omite (con `CLAUDE_PET_DEBUG=1` queda en el log) y no tumba la app. `cargo test` valida el `skins.json` instalado y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
 
+### Pokédex
+
+`tools/pokedex.py` convierte los iconos de la Pokédex de [PokeAPI](https://github.com/PokeAPI/sprites) en avatares. Necesita Python 3 y Pillow:
+
+```sh
+pip install pillow                                   # o: uv pip install pillow
+python3 tools/pokedex.py --gen 1 --preview kanto.png  # los 151 de Kanto
+python3 tools/pokedex.py --ids 25,133,143             # solo algunos (también rangos: 1-9)
+claude-pet skins skins.json
+```
+
+Por cada Pokémon descarga el icono de Generación VII (pixel art de 40×30), lo recorta, lo reduce solo si no cabe en 24×24 (nunca se amplía), deja a lo más 12 colores (`--colors`), lo centra con los pies en la última fila y busca los ojos (manchas chicas del color más oscuro en la parte de arriba) para que parpadee; `--no-eyes` lo desactiva. Los nombres salen en español de la API (`--no-names` los evita). Las descargas se guardan en `tools/.cache/`. Con `--preview` escribe una hoja PNG para revisar el resultado antes de instalarlo.
+
+Los sprites son propiedad de Nintendo, Game Freak y Creatures; PokeAPI los distribuye para uso personal. Por eso el repo no incluye ningún `skins.json`: cada quien lo genera (y `.gitignore` ya excluye `skins.json`, los previews y la caché).
+
 ## Actualizaciones
 
 La app se actualiza sola desde los [releases de GitHub](https://github.com/FrankRSC/claude-pet/releases):
