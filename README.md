@@ -85,7 +85,7 @@ claude-pet quit
 
 - **Avatar:** uno fijo para todos los monitos, o "Aleatorio" (uno distinto por sesión).
 - **Grupo del aleatorio:** qué avatares entran en el sorteo (y por los que pasa ⌥+clic). Cada uno se quita o se añade con su palomita; "Toda la generación N" mete o saca la generación completa y "Todos" vuelve a incluirlos todos. Si quitas todos, se sortea entre todos.
-- **Ícono de la barra:** qué avatar se dibuja en la barra de menú o la bandeja.
+- **Ícono de la barra:** qué avatar se dibuja en la barra de menú o la bandeja. Por defecto, un Pokémon del grupo al azar en cada arranque (el Monito solo si no hay avatares cargados); elige uno para fijarlo.
 
 ## Agentes compatibles
 

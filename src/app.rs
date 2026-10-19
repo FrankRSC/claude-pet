@@ -80,7 +80,7 @@ struct Tray {
     /// "Toda la generación N": la mete o saca completa del aleatorio.
     pool_gens: Vec<(u32, CheckMenuItem)>,
     pool_all: MenuId,
-    /// [i] = avatar i como ícono de la barra.
+    /// [0] = "Aleatorio"; [i + 1] = avatar i como ícono de la barra.
     icons: Vec<CheckMenuItem>,
     /// Mismo orden que `SIZES`.
     sizes: Vec<CheckMenuItem>,
@@ -114,8 +114,8 @@ struct App {
     demo_count: u32,
     /// None = cada sesión recibe uno distinto.
     avatar_choice: Option<usize>,
-    /// Avatar que se dibuja en la bandeja.
-    icon_choice: usize,
+    /// Avatar que se dibuja en la bandeja; None = un Pokémon al azar al arrancar.
+    icon_choice: Option<usize>,
     /// Avatares (por nombre) fuera del aleatorio.
     excluded: std::collections::HashSet<String>,
 }
@@ -153,8 +153,8 @@ fn load_avatar_choice() -> Option<usize> {
     find_avatar(load_config()["avatar"].as_str()?)
 }
 
-fn load_icon_choice() -> usize {
-    load_config()["icon"].as_str().and_then(find_avatar).unwrap_or(0)
+fn load_icon_choice() -> Option<usize> {
+    find_avatar(load_config()["icon"].as_str()?)
 }
 
 fn load_excluded() -> std::collections::HashSet<String> {
@@ -425,8 +425,12 @@ impl App {
         }
 
         let icon_menu = Submenu::new("Ícono de la barra", true);
+        let random_icon = CheckMenuItem::new("Aleatorio (uno al arrancar)", true, self.icon_choice.is_none(), None);
+        let _ = icon_menu.append(&random_icon);
+        let _ = icon_menu.append(&PredefinedMenuItem::separator());
         let icon_choice = self.icon_choice;
-        let (icons, _) = avatar_items(&icon_menu, |i| i == icon_choice);
+        let (mut icons, _) = avatar_items(&icon_menu, |i| icon_choice == Some(i));
+        icons.insert(0, random_icon);
 
         let size_menu = Submenu::new("Tamaño", true);
         let sizes: Vec<CheckMenuItem> = SIZES
@@ -449,7 +453,8 @@ impl App {
             &quit,
         ]);
         let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Claude Pet");
-        if let Some(icon) = tray_icon(self.icon_choice) {
+        let shown = self.icon_choice.unwrap_or_else(|| self.random_icon());
+        if let Some(icon) = tray_icon(shown) {
             builder = builder.with_icon(icon);
         }
         if let Ok(icon) = builder.build() {
@@ -470,14 +475,26 @@ impl App {
         }
     }
 
-    fn choose_icon(&mut self, k: usize) {
-        self.icon_choice = k;
-        save_config("icon", sprites::name(k).into());
+    /// Un Pokémon al azar del grupo para la bandeja (el Monito solo si no hay otro).
+    fn random_icon(&self) -> usize {
+        let pool: Vec<usize> = self.pool().into_iter().filter(|&i| i != 0).collect();
+        if pool.is_empty() {
+            return 0;
+        }
+        let seed = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_nanos() as u64);
+        pool[(hash(&seed.to_string()) % pool.len() as u64) as usize]
+    }
+
+    /// None = uno al azar en cada arranque.
+    fn choose_icon(&mut self, choice: Option<usize>) {
+        self.icon_choice = choice;
+        save_config("icon", choice.map_or_else(|| "aleatorio".to_string(), sprites::name).into());
+        let shown = choice.unwrap_or_else(|| self.random_icon());
         if let Some(tray) = &self.tray {
-            for (i, item) in tray.icons.iter().enumerate() {
-                item.set_checked(i == k);
+            for (k, item) in tray.icons.iter().enumerate() {
+                item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
             }
-            let _ = tray.icon.set_icon(tray_icon(k));
+            let _ = tray.icon.set_icon(tray_icon(shown));
         }
     }
 
@@ -762,7 +779,7 @@ impl App {
             if let Some(k) = tray.avatars.iter().position(|item| *item.id() == ev.id) {
                 self.choose_avatar(k.checked_sub(1));
             } else if let Some(k) = tray.icons.iter().position(|item| *item.id() == ev.id) {
-                self.choose_icon(k);
+                self.choose_icon(k.checked_sub(1));
             } else if let Some(k) = tray.pool.iter().position(|item| *item.id() == ev.id) {
                 // El ítem ya cambió de estado solo; lo leemos.
                 let on = tray.pool[k].is_checked();
