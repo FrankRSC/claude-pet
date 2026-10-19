@@ -69,12 +69,19 @@ struct PetWindow {
 }
 
 struct Tray {
-    _icon: TrayIcon,
+    icon: TrayIcon,
     demo: MenuId,
     hide: CheckMenuItem,
     notify: CheckMenuItem,
     /// [0] = "Aleatorio"; [i + 1] = avatar i.
     avatars: Vec<CheckMenuItem>,
+    /// [i] = avatar i entra en el aleatorio.
+    pool: Vec<CheckMenuItem>,
+    /// "Toda la generación N": la mete o saca completa del aleatorio.
+    pool_gens: Vec<(u32, CheckMenuItem)>,
+    pool_all: MenuId,
+    /// [i] = avatar i como ícono de la barra.
+    icons: Vec<CheckMenuItem>,
     /// Mismo orden que `SIZES`.
     sizes: Vec<CheckMenuItem>,
     update: MenuItem,
@@ -107,6 +114,10 @@ struct App {
     demo_count: u32,
     /// None = cada sesión recibe uno distinto.
     avatar_choice: Option<usize>,
+    /// Avatar que se dibuja en la bandeja.
+    icon_choice: usize,
+    /// Avatares (por nombre) fuera del aleatorio.
+    excluded: std::collections::HashSet<String>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -134,10 +145,29 @@ fn save_config(key: &str, value: Value) {
     let _ = std::fs::write(path, serde_json::to_string_pretty(&config).unwrap_or_default());
 }
 
-fn load_avatar_choice() -> Option<usize> {
-    let config = load_config();
-    let name = config["avatar"].as_str()?;
+fn find_avatar(name: &str) -> Option<usize> {
     (0..sprites::count()).find(|&i| sprites::name(i) == name)
+}
+
+fn load_avatar_choice() -> Option<usize> {
+    find_avatar(load_config()["avatar"].as_str()?)
+}
+
+fn load_icon_choice() -> usize {
+    load_config()["icon"].as_str().and_then(find_avatar).unwrap_or(0)
+}
+
+fn load_excluded() -> std::collections::HashSet<String> {
+    load_config()["excluded"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn save_excluded(excluded: &std::collections::HashSet<String>) {
+    let mut names: Vec<&String> = excluded.iter().collect();
+    names.sort();
+    save_config("excluded", serde_json::json!(names));
 }
 
 fn save_avatar_choice(choice: Option<usize>) {
@@ -146,9 +176,7 @@ fn save_avatar_choice(choice: Option<usize>) {
 
 /// Avatar elegido a mano para cada proyecto (por nombre de carpeta).
 fn load_project_avatar(label: &str) -> Option<usize> {
-    let config = load_config();
-    let name = config["project_avatars"][label].as_str()?;
-    (0..sprites::count()).find(|&i| sprites::name(i) == name)
+    find_avatar(load_config()["project_avatars"][label].as_str()?)
 }
 
 fn save_project_avatar(label: &str, avatar: usize) {
@@ -222,6 +250,8 @@ pub fn run(demo: bool, wait: bool) {
         demo_on_start: demo,
         demo_count: 0,
         avatar_choice: load_avatar_choice(),
+        icon_choice: load_icon_choice(),
+        excluded: load_excluded(),
     };
     let _ = event_loop.run_app(&mut app);
 }
@@ -304,6 +334,48 @@ fn agent_display(name: &str) -> String {
     }
 }
 
+/// Un ítem con palomita por avatar (índice = avatar) dentro de `menu`. Con
+/// pocos avatares van directo; con una Pokédex entera, en submenús por
+/// generación, que se devuelven por si hay que ponerles cabecera.
+fn avatar_items(menu: &Submenu, checked: impl Fn(usize) -> bool) -> (Vec<CheckMenuItem>, Vec<(u32, Submenu)>) {
+    let n = sprites::count();
+    let mut items = Vec::with_capacity(n);
+    let mut gens: Vec<(u32, Submenu)> = Vec::new();
+    for i in 0..n {
+        let item = CheckMenuItem::new(sprites::name(i), true, checked(i), None);
+        match sprites::generation(i).filter(|_| n > GROUP_FROM) {
+            None => {
+                let _ = menu.append(&item);
+            }
+            Some(g) => {
+                let k = match gens.iter().position(|(k, _)| *k == g) {
+                    Some(k) => k,
+                    None => {
+                        gens.push((g, Submenu::new(format!("Generación {g}"), true)));
+                        gens.len() - 1
+                    }
+                };
+                let _ = gens[k].1.append(&item);
+            }
+        }
+        items.push(item);
+    }
+    for (_, sub) in &gens {
+        let _ = menu.append(sub);
+    }
+    (items, gens)
+}
+
+/// Avatares de la generación `g`.
+fn in_generation(g: u32) -> Vec<usize> {
+    (0..sprites::count()).filter(|&i| sprites::generation(i) == Some(g)).collect()
+}
+
+fn tray_icon(index: usize) -> Option<Icon> {
+    let (rgba, w, h) = sprites::icon_rgba(index, pet::CLAUDE_ORANGE);
+    Icon::from_rgba(rgba, w, h).ok()
+}
+
 fn notify(summary: String, body: String) {
     std::thread::spawn(move || {
         let _ = notify_rust::Notification::new()
@@ -326,35 +398,36 @@ impl App {
         let notify = CheckMenuItem::new("Notificaciones", true, true, None);
         let update = MenuItem::new(update_label(self.available.as_deref()), true, None);
         let quit = MenuItem::new("Salir", true, None);
+        // Avatar: uno fijo para todos, o aleatorio.
         let avatar_menu = Submenu::new("Avatar", true);
-        let mut avatars = vec![CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None)];
-        let _ = avatar_menu.append(&avatars[0]);
+        let random = CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None);
+        let _ = avatar_menu.append(&random);
         let _ = avatar_menu.append(&PredefinedMenuItem::separator());
-        // Pocos avatares: lista plana. Una Pokédex entera: submenús por generación.
-        let n = sprites::count();
-        let mut gens: Vec<(u32, Submenu)> = Vec::new();
-        for i in 0..n {
-            let item = CheckMenuItem::new(sprites::name(i), true, self.avatar_choice == Some(i), None);
-            match sprites::generation(i).filter(|_| n > GROUP_FROM) {
-                None => {
-                    let _ = avatar_menu.append(&item);
-                }
-                Some(g) => {
-                    let k = match gens.iter().position(|(k, _)| *k == g) {
-                        Some(k) => k,
-                        None => {
-                            gens.push((g, Submenu::new(format!("Generación {g}"), true)));
-                            gens.len() - 1
-                        }
-                    };
-                    let _ = gens[k].1.append(&item);
-                }
-            }
-            avatars.push(item);
+        let choice = self.avatar_choice;
+        let (mut avatars, _) = avatar_items(&avatar_menu, |i| choice == Some(i));
+        avatars.insert(0, random);
+
+        // Grupo del aleatorio: qué avatares entran. Cada generación trae un
+        // ítem para meterla o sacarla completa.
+        let pool_menu = Submenu::new("Grupo del aleatorio", true);
+        let all = MenuItem::new("Todos", true, None);
+        let _ = pool_menu.append(&all);
+        let _ = pool_menu.append(&PredefinedMenuItem::separator());
+        let excluded = &self.excluded;
+        let (pool, gens) = avatar_items(&pool_menu, |i| !excluded.contains(&sprites::name(i)));
+        let mut pool_gens = Vec::new();
+        for (g, sub) in &gens {
+            let whole = in_generation(*g).into_iter().all(|i| pool[i].is_checked());
+            let item = CheckMenuItem::new(format!("Toda la generación {g}"), true, whole, None);
+            let _ = sub.prepend(&PredefinedMenuItem::separator());
+            let _ = sub.prepend(&item);
+            pool_gens.push((*g, item));
         }
-        for (_, sub) in &gens {
-            let _ = avatar_menu.append(sub);
-        }
+
+        let icon_menu = Submenu::new("Ícono de la barra", true);
+        let icon_choice = self.icon_choice;
+        let (icons, _) = avatar_items(&icon_menu, |i| i == icon_choice);
+
         let size_menu = Submenu::new("Tamaño", true);
         let sizes: Vec<CheckMenuItem> = SIZES
             .iter()
@@ -366,6 +439,8 @@ impl App {
         let _ = menu.append_items(&[
             &demo,
             &avatar_menu,
+            &pool_menu,
+            &icon_menu,
             &size_menu,
             &hide,
             &notify,
@@ -374,20 +449,64 @@ impl App {
             &quit,
         ]);
         let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Claude Pet");
-        if let Ok(icon) = Icon::from_rgba(sprites::icon_rgba(), 32, 32) {
+        if let Some(icon) = tray_icon(self.icon_choice) {
             builder = builder.with_icon(icon);
         }
         if let Ok(icon) = builder.build() {
             self.tray = Some(Tray {
-                _icon: icon,
+                icon,
                 demo: demo.id().clone(),
                 hide,
                 notify,
                 avatars,
+                pool,
+                pool_gens,
+                pool_all: all.id().clone(),
+                icons,
                 sizes,
                 update,
                 quit: quit.id().clone(),
             });
+        }
+    }
+
+    fn choose_icon(&mut self, k: usize) {
+        self.icon_choice = k;
+        save_config("icon", sprites::name(k).into());
+        if let Some(tray) = &self.tray {
+            for (i, item) in tray.icons.iter().enumerate() {
+                item.set_checked(i == k);
+            }
+            let _ = tray.icon.set_icon(tray_icon(k));
+        }
+    }
+
+    /// Avatares que entran en el aleatorio: los no excluidos (si no queda
+    /// ninguno, todos).
+    fn pool(&self) -> Vec<usize> {
+        let pool: Vec<usize> = (0..sprites::count()).filter(|&i| !self.excluded.contains(&sprites::name(i))).collect();
+        if pool.is_empty() { (0..sprites::count()).collect() } else { pool }
+    }
+
+    /// Mete (`on`) o saca del aleatorio los avatares `which`, lo guarda y
+    /// actualiza las palomitas, incluidas las de "Toda la generación".
+    fn set_in_pool(&mut self, which: &[usize], on: bool) {
+        for &i in which {
+            let name = sprites::name(i);
+            if on {
+                self.excluded.remove(&name);
+            } else {
+                self.excluded.insert(name);
+            }
+        }
+        save_excluded(&self.excluded);
+        if let Some(tray) = &self.tray {
+            for &i in which {
+                tray.pool[i].set_checked(on);
+            }
+            for (g, item) in &tray.pool_gens {
+                item.set_checked(in_generation(*g).into_iter().all(|i| tray.pool[i].is_checked()));
+            }
         }
     }
 
@@ -408,8 +527,8 @@ impl App {
         }
     }
 
-    /// El avatar fijo elegido, o uno que dependa de la sesión y que no repita
-    /// ninguno de los monitos que ya están en pantalla (mientras alcancen).
+    /// El avatar fijo elegido, o uno del grupo que dependa de la sesión y que
+    /// no repita ninguno de los monitos que ya están en pantalla (mientras alcancen).
     fn pick_avatar(&self, session: &str, label: &str) -> usize {
         if let Some(i) = load_project_avatar(label) {
             return i;
@@ -417,12 +536,12 @@ impl App {
         if let Some(i) = self.avatar_choice {
             return i;
         }
-        let n = sprites::count();
-        let start = (hash(session) % n as u64) as usize;
-        (0..n)
-            .map(|k| (start + k) % n)
+        let pool = self.pool();
+        let start = (hash(session) % pool.len() as u64) as usize;
+        (0..pool.len())
+            .map(|k| pool[(start + k) % pool.len()])
             .find(|i| self.pets.iter().all(|pw| pw.avatar != *i))
-            .unwrap_or(start)
+            .unwrap_or(pool[start])
     }
 
     fn set_avatar(pw: &mut PetWindow, avatar: usize) {
@@ -430,10 +549,13 @@ impl App {
         pw.look = sprites::look(avatar, pw.pet.color);
     }
 
-    /// Clic central o ⌥+clic: el siguiente avatar, solo para este monito. Se
-    /// recuerda para su proyecto.
-    fn next_avatar(pw: &mut PetWindow) {
-        let next = (pw.avatar + 1) % sprites::count();
+    /// Clic central o ⌥+clic: el siguiente avatar del grupo, solo para este
+    /// monito. Se recuerda para su proyecto.
+    fn next_avatar(&mut self, idx: usize) {
+        let pool = self.pool();
+        let cur = pool.iter().position(|&i| i == self.pets[idx].avatar);
+        let next = pool[cur.map_or(0, |c| (c + 1) % pool.len())];
+        let pw = &mut self.pets[idx];
         Self::set_avatar(pw, next);
         pw.pet.say(sprites::name(next), 1.5);
         save_project_avatar(&pw.pet.label, next);
@@ -468,6 +590,7 @@ impl App {
         let n = skins::reload();
         debug_log(format_args!("skins.json recargado: {n} avatares"));
         self.avatar_choice = load_avatar_choice();
+        self.icon_choice = load_icon_choice();
         if self.tray.is_some() {
             self.tray = None;
             self.build_tray();
@@ -638,6 +761,18 @@ impl App {
             let Some(tray) = &self.tray else { return };
             if let Some(k) = tray.avatars.iter().position(|item| *item.id() == ev.id) {
                 self.choose_avatar(k.checked_sub(1));
+            } else if let Some(k) = tray.icons.iter().position(|item| *item.id() == ev.id) {
+                self.choose_icon(k);
+            } else if let Some(k) = tray.pool.iter().position(|item| *item.id() == ev.id) {
+                // El ítem ya cambió de estado solo; lo leemos.
+                let on = tray.pool[k].is_checked();
+                self.set_in_pool(&[k], on);
+            } else if let Some(k) = tray.pool_gens.iter().position(|(_, item)| *item.id() == ev.id) {
+                let (g, on) = (tray.pool_gens[k].0, tray.pool_gens[k].1.is_checked());
+                self.set_in_pool(&in_generation(g), on);
+            } else if ev.id == tray.pool_all {
+                let all: Vec<usize> = (0..sprites::count()).collect();
+                self.set_in_pool(&all, true);
             } else if let Some(k) = tray.sizes.iter().position(|item| *item.id() == ev.id) {
                 self.choose_size(SIZES[k].1);
             } else if ev.id == tray.quit {
@@ -877,10 +1012,12 @@ impl ApplicationHandler<UserEvent> for App {
             debug_log(format_args!("{id:?} {event:?}"));
         }
         let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = event else { return };
-        let Some(pw) = self.pets.iter_mut().find(|pw| pw.window.id() == id) else { return };
+        let Some(idx) = self.pets.iter().position(|pw| pw.window.id() == id) else { return };
+        if button == MouseButton::Middle || (button == MouseButton::Left && platform::alt_down()) {
+            return self.next_avatar(idx);
+        }
+        let pw = &mut self.pets[idx];
         match button {
-            MouseButton::Middle => Self::next_avatar(pw),
-            MouseButton::Left if platform::alt_down() => Self::next_avatar(pw),
             MouseButton::Left => {
                 let c = platform::cursor_pos();
                 let now = Instant::now();

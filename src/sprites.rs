@@ -353,19 +353,42 @@ fn outline(g: Grid) -> Grid {
     out
 }
 
-/// Ícono RGBA de 32×32 para la bandeja: el arte del Monito a 2×.
-pub fn icon_rgba() -> Vec<u8> {
-    const SIZE: usize = ART * 2;
-    let mut out = vec![0u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            if let Some([r, g, b]) = art_cell(&STAND, x / 2, y / 2, crate::pet::CLAUDE_ORANGE) {
-                let i = (y * SIZE + x) * 4;
-                out[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+/// Ícono RGBA (datos, ancho, alto) para la bandeja: la pose principal del
+/// avatar recortada a lo que ocupa y metida en un cuadro, a 4 px por celda.
+/// macOS lo escala a 18 pt de alto y Windows a su tamaño de bandeja, así que
+/// lo que importa es que el sprite llene el cuadro.
+pub fn icon_rgba(index: usize, tint: Color) -> (Vec<u8>, u32, u32) {
+    const SCALE: usize = 4;
+    let look = look(index, tint);
+    let frame = look.frame(Pose::Stand);
+    let (mut x0, mut y0, mut x1, mut y1) = (GRID, GRID, 0, 0);
+    for (y, row) in frame.iter().enumerate() {
+        for (x, c) in row.iter().enumerate() {
+            if c.is_some() {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
             }
         }
     }
-    out
+    if x0 > x1 {
+        return (vec![0; 4], 1, 1);
+    }
+    let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+    let side = w.max(h);
+    let (ox, oy) = ((side - w) / 2, side - h); // centrado, con los pies abajo
+    let px = side * SCALE;
+    let mut out = vec![0u8; px * px * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let Some([r, g, b]) = frame[y0 + y][x0 + x] else { continue };
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    let i = (((oy + y) * SCALE + dy) * px + (ox + x) * SCALE + dx) * 4;
+                    out[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+    }
+    (out, px as u32, px as u32)
 }
 
 #[cfg(test)]
@@ -416,6 +439,20 @@ mod tests {
         // El contorno rodea el sprite.
         assert_eq!(open[oy - 1][ox], Some(OUTLINE));
         assert_eq!(open[oy][ox - 1], Some(OUTLINE));
+    }
+
+    #[test]
+    fn icon_is_a_square_filled_by_the_sprite() {
+        let (rgba, w, h) = icon_rgba(0, crate::pet::CLAUDE_ORANGE);
+        assert_eq!(w, h);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // El Monito mide 16 celdas de ancho: el cuadro es 16 × 4 px.
+        assert_eq!(w, 64);
+        let opaque = |x: u32, y: u32| rgba[((y * w + x) * 4 + 3) as usize] == 255;
+        let col_has = |x: u32| (0..h).any(|y| opaque(x, y));
+        let row_has = |y: u32| (0..w).any(|x| opaque(x, y));
+        assert!(row_has(h - 1) && col_has(0) && col_has(w - 1), "toca abajo y ambos lados");
+        assert!(!row_has(0), "arriba queda aire (el Monito no es cuadrado)");
     }
 
     #[test]

@@ -81,7 +81,11 @@ claude-pet quit
 - **Ventanas:** usan el borde de arriba de cualquier ventana no maximizada como plataforma. Saltan a ella, caminan encima y se tiran por la orilla. Si mueves la ventana, se van con ella. Si la cierras, la minimizas o la tapas con otra, se caen.
 - **Bordes:** caminan sobre la barra de tareas o el Dock, trepan las paredes, andan por el techo y pasan de un monitor a otro.
 
-**Bandeja / barra de menú:** monito de prueba, Avatar, Tamaño, ocultar, notificaciones on/off, buscar actualización, salir. La configuración se guarda en `config.json` junto al binario instalado.
+**Bandeja / barra de menú:** monito de prueba, Avatar, Grupo del aleatorio, Ícono de la barra, Tamaño, ocultar, notificaciones on/off, buscar actualización, salir. La configuración se guarda en `config.json` junto al binario instalado.
+
+- **Avatar:** uno fijo para todos los monitos, o "Aleatorio" (uno distinto por sesión).
+- **Grupo del aleatorio:** qué avatares entran en el sorteo (y por los que pasa ⌥+clic). Cada uno se quita o se añade con su palomita; "Toda la generación N" mete o saca la generación completa y "Todos" vuelve a incluirlos todos. Si quitas todos, se sortea entre todos.
+- **Ícono de la barra:** qué avatar se dibuja en la barra de menú o la bandeja.
 
 ## Agentes compatibles
 
@@ -107,7 +111,7 @@ De fábrica solo viene el Monito. Los demás se cargan de un archivo `skins.json
 claude-pet skins mi-archivo.json
 ```
 
-Valida el archivo, lo copia ahí y, si la app está corriendo, recarga el menú Avatar sin reiniciar. Con más de 30 avatares el menú se agrupa por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto.
+Valida el archivo, lo copia ahí y, si la app está corriendo, recarga los menús sin reiniciar. Con más de 30 avatares los menús se agrupan por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto del grupo del aleatorio; las elecciones (avatar fijo, grupo, ícono, avatar por proyecto) se guardan por nombre en `config.json`, así que sobreviven a un `skins.json` nuevo.
 
 El archivo lo genera `tools/pokedex.py` a partir de la Pokédex (ver abajo), pero también se puede escribir a mano:
 
