@@ -798,6 +798,19 @@ impl App {
             "SessionEnd" => pet.on_end(),
             _ => {}
         }
+        if event == "Stop" {
+            self.cheer_around(idx);
+        }
+    }
+
+    /// Festejo contagioso: los vecinos libres de un monito que terminó saltan con él.
+    fn cheer_around(&mut self, idx: usize) {
+        let (x, y) = (self.pets[idx].pet.x, self.pets[idx].pet.y);
+        for (k, pw) in self.pets.iter_mut().enumerate() {
+            if k != idx && (pw.pet.x - x).abs() < 500.0 && (pw.pet.y - y).abs() < 300.0 {
+                pw.pet.cheer();
+            }
+        }
     }
 
     fn on_available(&mut self, version: String) {
@@ -975,6 +988,26 @@ impl App {
             dt -= step;
             for pw in &mut self.pets {
                 pw.pet.update(step, &world);
+            }
+        }
+        // Se saludan al cruzarse (cada par una vez; antes de que se esquiven).
+        for j in 1..self.pets.len() {
+            let (left, right) = self.pets.split_at_mut(j);
+            for a in left.iter_mut() {
+                pet::meet(&mut a.pet, &mut right[0].pet);
+            }
+        }
+        // Los que no hacen nada voltean a ver al que te está llamando.
+        let calls: Vec<f32> = self.pets.iter().filter(|pw| pw.pet.mode == Mode::Attention).map(|pw| pw.pet.x).collect();
+        if !calls.is_empty() {
+            for pw in &mut self.pets {
+                if matches!(pw.pet.mode, Mode::Idle | Mode::Sitting) && !pw.pet.hover {
+                    let x = pw.pet.x;
+                    let nearest = calls.iter().copied().min_by(|p, q| (p - x).abs().total_cmp(&(q - x).abs()));
+                    if let Some(target) = nearest.filter(|t| (t - x).abs() > 1.0) {
+                        pw.pet.face(target);
+                    }
+                }
             }
         }
         for i in 0..self.pets.len() {

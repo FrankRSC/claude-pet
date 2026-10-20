@@ -116,6 +116,10 @@ pub struct Pet {
     pub squash: f32,
     /// Segundos que le quedan mostrando "?" (el agente espera tu respuesta).
     waiting: f32,
+    /// Segundos que le quedan mostrando ♥ (lo acaban de saludar).
+    love: f32,
+    /// Segundos antes de poder volver a saludar.
+    greet_cd: f32,
 }
 
 /// Iconito sobre la cabeza que dice cómo está, sin texto.
@@ -140,6 +144,32 @@ pub fn hash(s: &str) -> u64 {
     // FNV-1a: estable entre ejecuciones, así cada sesión conserva su color.
     s.bytes()
         .fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Dos monitos que se cruzan en el suelo se saludan: se miran, uno dice hola
+/// y al otro le sale un ♥. Cada uno espera un rato antes de volver a saludar.
+/// Devuelve si se saludaron.
+pub fn meet(a: &mut Pet, b: &mut Pet) -> bool {
+    let free = |p: &Pet| {
+        matches!(p.mode, Mode::Walking | Mode::Idle) && p.greet_cd <= 0.0 && p.chase <= 0.0 && p.bubble.is_none()
+    };
+    let close = (a.y - b.y).abs() < 2.0 && (a.x - b.x).abs() < size() * 0.9;
+    let toward = |p: &Pet, x: f32| p.mode == Mode::Walking && (x - p.x) * p.dir > 0.0;
+    if !(close && free(a) && free(b) && (toward(a, b.x) || toward(b, a.x))) {
+        return false;
+    }
+    const HELLO: [&str; 4] = ["¡Hola!", "¡Hey!", "¡Qué tal!", "¡Buenas!"];
+    let (ax, bx) = (a.x, b.x);
+    a.face(bx);
+    b.face(ax);
+    a.idle(1.8);
+    b.idle(1.8);
+    let k = (a.rand() * HELLO.len() as f32) as usize % HELLO.len();
+    a.say(HELLO[k], 1.6);
+    b.love = 1.6;
+    a.greet_cd = 90.0;
+    b.greet_cd = 90.0;
+    true
 }
 
 pub fn fmt_duration(d: Duration) -> String {
@@ -183,6 +213,8 @@ impl Pet {
             rng: h | 1,
             squash: 0.0,
             waiting: 0.0,
+            love: 0.0,
+            greet_cd: 20.0,
         };
         pet.x = area.l + pet.rand() * (area.r - area.l - size()).max(0.0);
         pet.dir = if pet.rand() < 0.5 { -1.0 } else { 1.0 };
@@ -321,7 +353,7 @@ impl Pet {
             Mode::Leaving | Mode::Dragged | Mode::Falling => None,
             Mode::Attention => Some(Emote::Bang),
             Mode::Celebrating => Some(Emote::Note),
-            Mode::Idle | Mode::Walking | Mode::Sitting if self.hover => Some(Emote::Heart),
+            Mode::Idle | Mode::Walking | Mode::Sitting if self.hover || self.love > 0.0 => Some(Emote::Heart),
             _ if self.waiting > 0.0 => Some(Emote::Question),
             _ if self.busy_since.is_some_and(|t| t.elapsed() > LONG_TASK) => Some(Emote::Sweat),
             _ => None,
@@ -407,6 +439,24 @@ impl Pet {
         }
     }
 
+    /// Mira hacia `x` (sin moverse).
+    pub fn face(&mut self, x: f32) {
+        let dir = if x > self.x { 1.0 } else { -1.0 };
+        if self.dir != dir {
+            self.dir = dir;
+        }
+    }
+
+    /// Otro monito terminó cerca: un saltito de festejo si está libre y despierto.
+    pub fn cheer(&mut self) {
+        if matches!(self.mode, Mode::Idle | Mode::Walking | Mode::Sitting) && !self.busy() && !self.perched() {
+            self.mode = Mode::Celebrating;
+            self.hops = 0;
+            self.vy = -420.0;
+            self.squash = -0.12;
+        }
+    }
+
     // ---- simulación ----
 
     /// Altura de los pies sobre lo que lo sostiene, siguiendo a la ventana si se
@@ -440,6 +490,8 @@ impl Pet {
         self.timer -= dt;
         self.chase -= dt;
         self.waiting = (self.waiting - dt).max(0.0);
+        self.love = (self.love - dt).max(0.0);
+        self.greet_cd -= dt;
         if self.squash != 0.0 {
             self.squash *= (-12.0 * dt).exp();
             if self.squash.abs() < 0.01 {
@@ -842,6 +894,44 @@ mod tests {
         other.idle(5.0);
         other.knock(600.0, -300.0);
         assert_eq!(other.mode, Mode::Falling);
+    }
+
+    #[test]
+    fn walking_into_each_other_they_say_hello_once() {
+        let ground = SCREEN.b - size();
+        let mut a = pet_at(400.0, ground);
+        let mut b = pet_at(400.0 + size() * 0.8, ground);
+        for p in [&mut a, &mut b] {
+            p.start_walking();
+            p.greet_cd = 0.0;
+        }
+        a.dir = 1.0;
+        b.dir = 1.0;
+        assert!(meet(&mut a, &mut b), "a camina hacia b");
+        assert_eq!((a.mode, b.mode), (Mode::Idle, Mode::Idle));
+        assert!(a.bubble.is_some());
+        assert_eq!(b.emote(), Some(Emote::Heart));
+        assert!(b.facing_left(), "b se voltea hacia a");
+        a.bubble = None;
+        a.start_walking();
+        assert!(!meet(&mut a, &mut b), "no vuelven a saludarse enseguida");
+    }
+
+    #[test]
+    fn neighbours_cheer_unless_busy() {
+        let ground = SCREEN.b - size();
+        let mut idle = pet_at(400.0, ground);
+        idle.idle(5.0);
+        idle.cheer();
+        assert_eq!(idle.mode, Mode::Celebrating);
+        run(&mut idle, &world(&[]), 2.0);
+        assert_eq!(idle.y, ground, "aterriza en el mismo piso");
+
+        let mut busy = pet_at(400.0, ground);
+        busy.idle(5.0);
+        busy.on_prompt();
+        busy.cheer();
+        assert_eq!(busy.mode, Mode::Walking);
     }
 
     #[test]
