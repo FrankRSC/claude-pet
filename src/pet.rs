@@ -81,6 +81,8 @@ pub enum Mode {
 pub struct Pet {
     pub session: String,
     pub label: String,
+    /// Carpeta de la sesión (para ir a ella con doble clic).
+    pub cwd: String,
     /// Quién manda los eventos: "Claude", "Codex", "Gemini", "OpenCode"…
     pub agent: String,
     pub color: [u8; 3],
@@ -203,6 +205,7 @@ impl Pet {
         let color = if index == 0 { CLAUDE_ORANGE } else { PALETTE[(h % PALETTE.len() as u64) as usize] };
         let mut pet = Pet {
             session,
+            cwd: String::new(),
             agent,
             color,
             pid,

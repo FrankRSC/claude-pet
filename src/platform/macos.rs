@@ -240,10 +240,16 @@ fn c_text(raw: &[libc::c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// (ppid, nombre) de un proceso, sin lanzar `ps`.
+/// (ppid, nombre) de un proceso, sin lanzar `ps`. Usa la variante corta de
+/// proc_pidinfo porque la completa falla con procesos de otro usuario, como
+/// el `login` (de root) que hay entre una terminal y su shell.
 fn parent_of(pid: u32) -> Option<(u32, String)> {
-    let info = bsd_info(pid)?;
-    Some((info.pbi_ppid, c_text(&info.pbi_comm)))
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDT_SHORTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size)
+    };
+    (got == size).then(|| (info.pbsi_ppid, c_text(&info.pbsi_comm)))
 }
 
 pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
@@ -317,6 +323,156 @@ pub fn processes_named(name: &str) -> Vec<super::ProcInfo> {
         .collect()
 }
 
+/// La terminal de un proceso ("/dev/ttys003"), si tiene.
+fn tty_of(pid: u32) -> Option<String> {
+    let dev = bsd_info(pid)?.e_tdev;
+    if dev == u32::MAX || dev == 0 {
+        return None;
+    }
+    let name = unsafe { libc::devname(dev as libc::dev_t, libc::S_IFCHR) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    (!name.is_empty() && name != "??").then(|| format!("/dev/{name}"))
+}
+
+/// La primera app con ventanas (política Regular) subiendo desde `pid`:
+/// (pid de la app, bundle id si tiene).
+fn gui_ancestor(pid: u32) -> Option<(u32, Option<String>)> {
+    let mut p = pid;
+    for _ in 0..24 {
+        let app: *mut AnyObject =
+            unsafe { msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: p as libc::pid_t] };
+        if !app.is_null() {
+            let policy: isize = unsafe { msg_send![app, activationPolicy] };
+            if policy == 0 {
+                let id: *mut AnyObject = unsafe { msg_send![app, bundleIdentifier] };
+                let bundle = (!id.is_null()).then(|| {
+                    let utf8: *const libc::c_char = unsafe { msg_send![id, UTF8String] };
+                    unsafe { std::ffi::CStr::from_ptr(utf8) }.to_string_lossy().into_owned()
+                });
+                return Some((p, bundle));
+            }
+        }
+        let (ppid, _) = parent_of(p)?;
+        if ppid <= 1 || ppid == p {
+            return None;
+        }
+        p = ppid;
+    }
+    None
+}
+
+/// Editores tipo VS Code: `open -b <id> <carpeta>` enfoca la ventana de esa carpeta.
+const EDITORS: [&str; 5] = [
+    "com.microsoft.VSCode",
+    "com.microsoft.VSCodeInsiders",
+    "com.todesktop.230313mzl4w4u92", // Cursor
+    "com.exafunction.windsurf",
+    "com.vscodium",
+];
+
+/// AppleScript que selecciona la pestaña (o sesión de iTerm2) con esa tty.
+fn select_tab_script(bundle: &str, tty: &str) -> Option<String> {
+    let body = match bundle {
+        "com.apple.Terminal" => format!(
+            r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "no""#
+        ),
+        "com.googlecode.iterm2" => format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          select w
+          select t
+          select s
+          activate
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no""#
+        ),
+        _ => return None,
+    };
+    Some(body)
+}
+
+/// La carpeta que el editor tiene abierta, probablemente: la raíz del repo
+/// (la que tiene .git) o, si no hay, la carpeta misma.
+fn workspace_of(cwd: &str) -> String {
+    let start = Path::new(cwd);
+    start
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(start)
+        .display()
+        .to_string()
+}
+
+/// Corre un comando y dice si salió bien (un AppleScript que devuelve "no"
+/// cuenta como fallo). Lo que falle queda en el log de depuración.
+fn run_ok(cmd: &str, args: &[&str]) -> bool {
+    match Command::new(cmd).args(args).stdin(Stdio::null()).output() {
+        Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "no" => true,
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr);
+            let out = String::from_utf8_lossy(&o.stdout);
+            crate::app::debug_log(format_args!("{cmd} falló: {} {}", out.trim(), why.trim()));
+            false
+        }
+        Err(e) => {
+            crate::app::debug_log(format_args!("{cmd} no corrió: {e}"));
+            false
+        }
+    }
+}
+
+/// Trae al frente la ventana de la sesión del proceso `pid`: la pestaña exacta
+/// en Terminal e iTerm2 (macOS pide permiso de Automatización la primera vez),
+/// la carpeta en editores tipo VS Code y, si no, la app. Devuelve la app a la
+/// que va (su bundle id), o None si la sesión no tiene ventana; el cambio de
+/// foco ocurre en otro hilo.
+pub fn focus_session(pid: u32, cwd: &str) -> Option<String> {
+    let (app_pid, bundle) = gui_ancestor(pid)?;
+    let Some(bundle) = bundle else {
+        let app: *mut AnyObject =
+            unsafe { msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: app_pid as libc::pid_t] };
+        let _: bool = unsafe { msg_send![app, activateWithOptions: 1usize] };
+        return Some(format!("pid {app_pid}"));
+    };
+    let script = tty_of(pid).and_then(|tty| select_tab_script(&bundle, &tty));
+    let folder = (EDITORS.contains(&bundle.as_str()) && !cwd.is_empty()).then(|| workspace_of(cwd));
+    let id = bundle.clone();
+    std::thread::spawn(move || {
+        let done = match (&script, &folder) {
+            (Some(s), _) => run_ok("/usr/bin/osascript", &["-e", s]),
+            (None, Some(dir)) => run_ok("/usr/bin/open", &["-b", &id, dir]),
+            _ => false,
+        };
+        if !done {
+            run_ok("/usr/bin/open", &["-b", &id]);
+        }
+    });
+    Some(bundle)
+}
+
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
     let _ = Command::new(exe)
         .args(args)
@@ -365,6 +521,15 @@ mod tests {
         buf.extend(b"/bin/codex\0\0\0\0codex\0app-server\0--listen\0HOME=/x\0");
         assert_eq!(parse_procargs(&buf), ["codex", "app-server", "--listen"]);
         assert!(parse_procargs(&[1, 0]).is_empty());
+    }
+
+    #[test]
+    fn finds_the_repo_root_and_scripts_by_terminal() {
+        let here = env!("CARGO_MANIFEST_DIR");
+        assert_eq!(workspace_of(&format!("{here}/src/platform")), here);
+        assert!(select_tab_script("com.apple.Terminal", "/dev/ttys001").unwrap().contains("tty of t is \"/dev/ttys001\""));
+        assert!(select_tab_script("com.googlecode.iterm2", "/dev/ttys001").unwrap().contains("sessions of t"));
+        assert!(select_tab_script("com.microsoft.VSCode", "/dev/ttys001").is_none());
     }
 
     #[test]

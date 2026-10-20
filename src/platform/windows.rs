@@ -277,6 +277,59 @@ pub fn processes_named(name: &str) -> Vec<super::ProcInfo> {
         .collect()
 }
 
+unsafe extern "system" fn first_window_of(hwnd: HWND, data: LPARAM) -> BOOL {
+    let (pid, found) = &mut *(data as *mut (u32, HWND));
+    let mut owner = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut owner);
+    if owner == *pid && IsWindowVisible(hwnd) != 0 && GetWindowTextLengthW(hwnd) > 0 {
+        *found = hwnd;
+        return 0;
+    }
+    1
+}
+
+fn window_of(pid: u32) -> Option<HWND> {
+    let mut data: (u32, HWND) = (pid, null_mut());
+    unsafe { EnumWindows(Some(first_window_of), &mut data as *mut _ as LPARAM) };
+    (!data.1.is_null()).then_some(data.1)
+}
+
+/// Trae al frente la ventana de la sesión del proceso `pid`: sube por sus
+/// padres (y la consola `conhost`/`OpenConsole` de cada uno) hasta uno con
+/// ventana visible, sin llegar al Explorador. Devuelve el ejecutable de esa
+/// ventana, o None si no hay. A mejor esfuerzo: Windows no deja elegir la
+/// pestaña de Windows Terminal desde fuera.
+pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
+    let table = process_table();
+    let mut p = pid;
+    for _ in 0..24 {
+        let (ppid, name) = table.get(&p)?.clone();
+        if name.eq_ignore_ascii_case("explorer.exe") {
+            return None;
+        }
+        let consoles = table
+            .iter()
+            .filter(|(_, (parent, n))| *parent == p && (n.eq_ignore_ascii_case("conhost.exe") || n.eq_ignore_ascii_case("OpenConsole.exe")))
+            .map(|(c, _)| *c);
+        for candidate in std::iter::once(p).chain(consoles) {
+            if let Some(hwnd) = window_of(candidate) {
+                unsafe {
+                    if IsIconic(hwnd) != 0 {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    SetForegroundWindow(hwnd);
+                }
+                return Some(table.get(&candidate).map_or(name, |(_, n)| n.clone()));
+            }
+        }
+        if ppid == 0 || ppid == p {
+            return None;
+        }
+        p = ppid;
+    }
+    None
+}
+
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

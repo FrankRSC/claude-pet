@@ -34,6 +34,22 @@ fn main() {
             installer::uninstall(value("--agent").as_deref().unwrap_or("all"));
         }
         "quit" => ipc::send_quit(),
+        "focus" => {
+            // Diagnóstico de "ir a la sesión": lo mismo que el doble clic.
+            platform::attach_console();
+            match args.get(2).and_then(|s| s.parse::<u32>().ok()) {
+                Some(pid) => {
+                    let cwd = args.get(3).map_or("", String::as_str);
+                    match platform::focus_session(pid, cwd) {
+                        Some(app) => println!("Voy a {app}"),
+                        None => eprintln!("El proceso {pid} no tiene una ventana a la cual ir."),
+                    }
+                    // El cambio de foco corre en otro hilo.
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
+                None => eprintln!("uso: claude-pet focus <pid> [carpeta]"),
+            }
+        }
         "restart" => {
             // Lo mismo que "Reiniciar Claude Pet" en el menú; si no corre, la arranca.
             let msg = serde_json::json!({ "cmd": "restart" });

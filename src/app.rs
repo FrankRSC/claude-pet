@@ -66,6 +66,8 @@ struct PetWindow {
     /// y dónde: si no cambian, no se dibuja ni se toca la ventana.
     last_frame: u64,
     last_pos: (i32, i32),
+    /// Cuándo se apretó el último clic suelto, para reconocer el doble clic.
+    last_click: Option<Instant>,
 }
 
 struct Tray {
@@ -648,6 +650,7 @@ impl App {
         session: String,
         label: String,
         agent: String,
+        cwd: &str,
         pid: Option<u32>,
     ) -> Option<usize> {
         let attrs = Window::default_attributes()
@@ -664,7 +667,8 @@ impl App {
         let (cx, cy) = platform::cursor_pos();
         let area = area_at(&self.areas, cx, cy);
         let avatar = self.pick_avatar(&session, &label);
-        let pet = Pet::new(session, label, agent, pid, area, self.pets.len());
+        let mut pet = Pet::new(session, label, agent, pid, area, self.pets.len());
+        pet.cwd = cwd.to_string();
         let look = sprites::look(avatar, pet.color);
         self.pets.push(PetWindow {
             pet,
@@ -677,6 +681,7 @@ impl App {
             shown: false,
             last_frame: 0,
             last_pos: (i32::MIN, i32::MIN),
+            last_click: None,
         });
         // Que el primer cuadro llegue ya y no simule el rato que el loop durmió.
         self.floors_at = Instant::now() - FLOORS_EVERY;
@@ -758,7 +763,7 @@ impl App {
                 let pid = if v["agent"] == "codex" { codex_pid(pid, cwd) } else { pid };
                 debug_log(format_args!("monito nuevo: {session} ({agent}, {event}, pid={pid:?})"));
                 let label = label_from_cwd(cwd, &agent);
-                match self.spawn_pet(el, session.to_string(), label, agent, pid) {
+                match self.spawn_pet(el, session.to_string(), label, agent, cwd, pid) {
                     Some(i) => i,
                     None => return,
                 }
@@ -1072,7 +1077,17 @@ pub fn debug_log(msg: std::fmt::Arguments) {
     }
 }
 
-/// Clic corto = globo con info; mantener o mover = arrastrar; soltar = lanzar.
+/// Trae al frente la terminal o el editor de la sesión del monito.
+fn go_to_session(pet: &mut Pet) {
+    let target = pet.pid.and_then(|pid| platform::focus_session(pid, &pet.cwd));
+    debug_log(format_args!("ir a la sesión {} (pid {:?}): {target:?}", pet.session, pet.pid));
+    if target.is_none() {
+        pet.say("No encontré su ventana", 2.5);
+    }
+}
+
+/// Clic corto = globo con info; doble clic = ir a la sesión; mantener o
+/// mover = arrastrar; soltar = lanzar.
 fn drag(pw: &mut PetWindow, cursor: (f32, f32), down: bool, now: Instant) {
     let Some(p) = &mut pw.press else { return };
     debug_log(format_args!(
@@ -1100,7 +1115,17 @@ fn drag(pw: &mut PetWindow, cursor: (f32, f32), down: bool, now: Instant) {
         if p.dragging {
             pw.pet.throw(p.vel.0, p.vel.1);
         } else {
-            pw.pet.on_click();
+            // Doble clic, o un clic si te está llamando: a su sesión. Se mide
+            // entre los momentos en que se apretó, que llegan sin retraso.
+            let pressed = p.at;
+            let double = pw.last_click.is_some_and(|t| pressed - t < Duration::from_millis(450));
+            if double || pw.pet.mode == Mode::Attention {
+                pw.last_click = None;
+                go_to_session(&mut pw.pet);
+            } else {
+                pw.pet.on_click();
+                pw.last_click = Some(pressed);
+            }
         }
         pw.press = None;
     }
