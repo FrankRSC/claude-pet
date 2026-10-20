@@ -225,22 +225,96 @@ pub fn pid_alive(pid: u32) -> bool {
     ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// (ppid, nombre) de un proceso, sin lanzar `ps`.
-fn parent_of(pid: u32) -> Option<(u32, String)> {
+fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let got = unsafe {
         libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size)
     };
-    if got != size {
-        return None;
-    }
-    let name = unsafe { std::ffi::CStr::from_ptr(info.pbi_comm.as_ptr()) }.to_string_lossy().into_owned();
-    Some((info.pbi_ppid, name))
+    (got == size).then_some(info)
+}
+
+/// Texto C de un arreglo de tamaño fijo, sin pasarse si no trae el NUL final.
+fn c_text(raw: &[libc::c_char]) -> String {
+    let bytes: Vec<u8> = raw.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// (ppid, nombre) de un proceso, sin lanzar `ps`.
+fn parent_of(pid: u32) -> Option<(u32, String)> {
+    let info = bsd_info(pid)?;
+    Some((info.pbi_ppid, c_text(&info.pbi_comm)))
 }
 
 pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
     super::find_ancestor(std::process::id(), parent_of, names)
+}
+
+fn proc_cwd(pid: u32) -> Option<String> {
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDVNODEPATHINFO, 0, &mut info as *mut _ as *mut libc::c_void, size)
+    };
+    if got != size {
+        return None;
+    }
+    Some(c_text(info.pvi_cdir.vip_path.as_flattened())).filter(|s| !s.is_empty())
+}
+
+/// argv de un proceso (KERN_PROCARGS2). Solo funciona con procesos del mismo usuario.
+fn proc_args(pid: u32) -> Vec<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    let null = std::ptr::null_mut();
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, null, &mut size, null, 0) } != 0 || size == 0 {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; size];
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr() as *mut libc::c_void, &mut size, null, 0) } != 0 {
+        return Vec::new();
+    }
+    buf.truncate(size);
+    parse_procargs(&buf)
+}
+
+/// Formato de KERN_PROCARGS2: argc (i32), ruta del ejecutable, NULs de
+/// relleno y luego argc cadenas separadas por NUL (después viene el entorno).
+fn parse_procargs(buf: &[u8]) -> Vec<String> {
+    let Some(argc) = buf.get(..4).map(|b| i32::from_ne_bytes([b[0], b[1], b[2], b[3]]).max(0) as usize) else {
+        return Vec::new();
+    };
+    let rest = &buf[4..];
+    let Some(mut i) = rest.iter().position(|&b| b == 0) else { return Vec::new() };
+    while rest.get(i) == Some(&0) {
+        i += 1;
+    }
+    rest[i..].split(|&b| b == 0).take(argc).map(|s| String::from_utf8_lossy(s).into_owned()).collect()
+}
+
+/// Procesos que se llaman exactamente `name`, con su argv, carpeta y arranque.
+pub fn processes_named(name: &str) -> Vec<super::ProcInfo> {
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0 as libc::c_int; n as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+    let got = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes) };
+    pids.truncate(got.max(0) as usize);
+    pids.into_iter()
+        .filter(|&p| p > 0)
+        .filter_map(|p| {
+            let pid = p as u32;
+            let info = bsd_info(pid)?;
+            (c_text(&info.pbi_comm) == name).then(|| super::ProcInfo {
+                pid,
+                args: proc_args(pid),
+                cwd: proc_cwd(pid),
+                started: info.pbi_start_tvsec,
+            })
+        })
+        .collect()
 }
 
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
@@ -280,3 +354,28 @@ pub fn set_autostart(exe: Option<&Path>) {
 }
 
 pub fn attach_console() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_procargs() {
+        let mut buf = 3i32.to_ne_bytes().to_vec();
+        buf.extend(b"/bin/codex\0\0\0\0codex\0app-server\0--listen\0HOME=/x\0");
+        assert_eq!(parse_procargs(&buf), ["codex", "app-server", "--listen"]);
+        assert!(parse_procargs(&[1, 0]).is_empty());
+    }
+
+    #[test]
+    fn sees_itself() {
+        let me = std::process::id();
+        let exe = std::env::current_exe().unwrap();
+        let name = c_text(&bsd_info(me).unwrap().pbi_comm);
+        let found = processes_named(&name);
+        let p = found.iter().find(|p| p.pid == me).expect("el propio proceso");
+        assert!(p.started > 0);
+        assert_eq!(p.cwd.as_deref().map(std::path::Path::new), Some(std::env::current_dir().unwrap().as_path()));
+        assert_eq!(std::path::Path::new(&p.args[0]).file_name(), exe.file_name());
+    }
+}

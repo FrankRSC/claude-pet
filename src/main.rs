@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod codex;
 mod geom;
 mod hook_client;
 mod installer;
@@ -33,6 +34,15 @@ fn main() {
             installer::uninstall(value("--agent").as_deref().unwrap_or("all"));
         }
         "quit" => ipc::send_quit(),
+        "restart" => {
+            // Lo mismo que "Reiniciar Claude Pet" en el menú; si no corre, la arranca.
+            let msg = serde_json::json!({ "cmd": "restart" });
+            if !ipc::send(&msg, std::time::Duration::from_millis(500)) {
+                if let Ok(exe) = std::env::current_exe() {
+                    platform::spawn_detached(&exe, &["run"]);
+                }
+            }
+        }
         "size" => {
             platform::attach_console();
             match args.get(2).and_then(|s| s.parse::<u32>().ok()) {
@@ -74,7 +84,7 @@ fn main() {
         _ => {
             platform::attach_console();
             eprintln!(
-                "uso: claude-pet [run [--demo] | hook [--agent <nombre>] | install [--no-autostart] [--agent claude|codex|gemini|opencode|all] | uninstall [--agent …] | skins <archivo.json> | size <n> | quit]"
+                "uso: claude-pet [run [--demo] | hook [--agent <nombre>] | install [--no-autostart] [--agent claude|codex|gemini|opencode|all] | uninstall [--agent …] | skins <archivo.json> | size <n> | restart | quit]"
             );
         }
     }

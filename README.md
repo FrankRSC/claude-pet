@@ -57,6 +57,7 @@ claude-pet run --demo                 # abre la app con un monito de prueba
 claude-pet size <2-5>                 # tamaño en px por celda (3 = normal)
 claude-pet skins <skins.json>         # carga avatares (ver Avatares)
 claude-pet floors                     # diagnóstico: ventanas y plataformas detectadas
+claude-pet restart                    # reinicia la app y vuelve a buscar sesiones abiertas
 claude-pet quit
 ```
 
@@ -81,7 +82,7 @@ claude-pet quit
 - **Ventanas:** usan el borde de arriba de cualquier ventana no maximizada como plataforma. Saltan a ella, caminan encima y se tiran por la orilla. Si mueves la ventana, se van con ella. Si la cierras, la minimizas o la tapas con otra, se caen.
 - **Bordes:** caminan sobre la barra de tareas o el Dock, trepan las paredes, andan por el techo y pasan de un monitor a otro.
 
-**Bandeja / barra de menú:** monito de prueba, Avatar, Grupo del aleatorio, Ícono de la barra, Tamaño, ocultar, notificaciones on/off, buscar actualización, salir. La configuración se guarda en `config.json` junto al binario instalado.
+**Bandeja / barra de menú:** monito de prueba, Avatar, Grupo del aleatorio, Ícono de la barra, Tamaño, ocultar, notificaciones on/off, buscar actualización, reiniciar, salir. La configuración se guarda en `config.json` junto al binario instalado.
 
 - **Avatar:** uno fijo para todos los monitos, o "Aleatorio" (uno distinto por sesión).
 - **Grupo del aleatorio:** qué avatares entran en el sorteo (y por los que pasa ⌥+clic). Cada uno se quita o se añade con su palomita; "Toda la generación N" mete o saca la generación completa y "Todos" vuelve a incluirlos todos. Si quitas todos, se sortea entre todos.
@@ -99,6 +100,7 @@ La app no sabe de ningún agente en particular: escucha cinco eventos por TCP lo
 | OpenCode | plugin en `~/.config/opencode/plugins/claude-pet.ts` | `session.created`, `chat.message`, `session.idle`, `permission.asked`, `session.deleted` |
 
 - **Codex** no ejecuta hooks que no hayas aprobado: tras instalar, abre Codex y ejecuta `/hooks` para aprobar el de claude-pet. Si lo saltas no habrá monito ni ningún error visible. Si el comando cambia (por ejemplo, al reinstalar en otra ruta) hay que aprobarlo de nuevo.
+- **Sesiones de Codex ya abiertas:** Codex solo dispara hooks al empezar un turno, así que una sesión abierta o reanudada a la que no le has escrito no avisaría. En macOS la app las busca sola al arrancar, al reiniciar y cada 15 s: toma cada proceso `codex` de terminal (no el daemon `codex app-server`), su carpeta, y el rollout más reciente de `~/.codex/sessions` con esa carpeta. El monito queda atado a ese proceso y se va cuando cierras Codex. En Windows esto no está disponible (el sistema no da la carpeta de otro proceso) y el monito aparece con el primer prompt.
 - **OpenCode** no tiene hooks de shell, así que va un plugin que recibe los eventos en proceso y ejecuta el binario. Ignora las sesiones de subagentes y el "idle" inicial de cada sesión (no es un "¡Listo!"), y manda el PID de OpenCode para que el monito se vaya cuando lo cierres.
 - **Otros CLI con hooks** (Cursor, Copilot, Kiro…): configura a mano un hook de tipo comando que ejecute `"/ruta/claude-pet" hook --agent <nombre>` con el JSON del evento por stdin (`hook_event_name`, `session_id`, `cwd`). Los nombres de evento que no se reconocen pasan tal cual, así que sirve cualquiera que coincida con los cinco de arriba.
 - El monito muestra el agente en el globo al hacer clic y en los avisos ("Codex terminó"). Para ver qué llega, `CLAUDE_PET_DEBUG=1` escribe cada evento en `claude-pet.log`.
@@ -205,6 +207,7 @@ src/render.rs       dibujo del sprite y los globos (buffer ARGB)
 src/sprites.rs      el Monito, y las poses y el contorno de cada avatar
 src/skins.rs        carga y valida skins.json (avatares en tiempo de ejecución)
 src/hook_client.rs  `claude-pet hook --agent …`: traduce el evento del agente y lo manda a la app
+src/codex.rs        encuentra sesiones de Codex abiertas que todavía no mandaron hooks
 src/installer.rs    install/uninstall de hooks por agente
 assets/opencode/    plugin de OpenCode (se copia con la ruta del binario)
 src/platform/       Windows (layered windows, Win32) y macOS (AppKit/CoreGraphics)

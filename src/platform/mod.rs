@@ -1,7 +1,19 @@
 //! Todo lo que depende del sistema operativo. Cada backend expone la misma API:
 //! `Surface`, `work_areas`, `cursor_pos`, `left_button_down`, `pid_alive`,
-//! `find_agent_pid`, `spawn_detached`, `set_autostart`, `attach_console`,
-//! `window_attributes`.
+//! `find_agent_pid`, `processes_named`, `spawn_detached`, `set_autostart`,
+//! `attach_console`, `window_attributes`.
+
+/// Un proceso visto desde fuera, lo justo para reconocer la sesión de un agente.
+#[derive(Clone, Debug)]
+pub struct ProcInfo {
+    pub pid: u32,
+    /// argv completo (vacío si el sistema no lo da).
+    pub args: Vec<String>,
+    /// Carpeta de trabajo (None si el sistema no la da).
+    pub cwd: Option<String>,
+    /// Segundos desde 1970 en que arrancó (0 si no se sabe).
+    pub started: u64,
+}
 
 #[cfg(windows)]
 mod windows;

@@ -267,6 +267,16 @@ pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
     super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned(), names)
 }
 
+/// Procesos `name.exe`. Windows no da argv ni carpeta sin leer la memoria del
+/// proceso, así que van vacíos (y el descubrimiento de sesiones no aplica).
+pub fn processes_named(name: &str) -> Vec<super::ProcInfo> {
+    process_table()
+        .into_iter()
+        .filter(|(_, (_, exe))| exe.to_lowercase().trim_end_matches(".exe") == name)
+        .map(|(pid, _)| super::ProcInfo { pid, args: Vec::new(), cwd: None, started: 0 })
+        .collect()
+}
+
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

@@ -16,7 +16,7 @@ use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
-use crate::{installer, ipc, skins, sprites, updater};
+use crate::{codex, installer, ipc, skins, sprites, updater};
 
 /// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
 /// arrastras necesita 60; el sprite se anima a 4 por segundo.
@@ -85,6 +85,7 @@ struct Tray {
     /// Mismo orden que `SIZES`.
     sizes: Vec<CheckMenuItem>,
     update: MenuItem,
+    restart: MenuId,
     quit: MenuId,
 }
 
@@ -106,6 +107,7 @@ struct App {
     /// Si no se pudo crear, revisamos la carpeta cada pocos segundos.
     watcher: Option<notify::RecommendedWatcher>,
     last_scan: Instant,
+    last_codex_scan: Instant,
     /// Sesiones que ya tuvieron monito; el escaneo no las revive.
     scanned: std::collections::HashSet<String>,
     tray: Option<Tray>,
@@ -244,6 +246,7 @@ pub fn run(demo: bool, wait: bool) {
         proxy: event_loop.create_proxy(),
         watcher: watch_sessions(event_loop.create_proxy()),
         last_scan: now,
+        last_codex_scan: now,
         scanned: Default::default(),
         tray: None,
         hidden: false,
@@ -323,6 +326,27 @@ fn label_from_cwd(cwd: &str, agent: &str) -> String {
     if name.is_empty() { agent.into() } else { name.into() }
 }
 
+/// Arranca una instancia nueva (que espera a que esta suelte el puerto) y
+/// cierra esta. Al arrancar, la nueva vuelve a buscar las sesiones abiertas.
+fn restart(el: &ActiveEventLoop) {
+    debug_log(format_args!("reiniciando"));
+    if let Ok(exe) = std::env::current_exe() {
+        platform::spawn_detached(&exe, &["run", "--wait"]);
+    }
+    el.exit();
+}
+
+/// Los hooks de la TUI de Codex los corre el daemon `codex app-server`, que no
+/// muere al cerrar la sesión: el monito se ata al proceso de Codex que trabaja
+/// en esa carpeta. Si el hook ya viene de un cliente (`codex exec`), ese mismo.
+fn codex_pid(hook_pid: Option<u32>, cwd: &str) -> Option<u32> {
+    let clients = codex::clients();
+    if hook_pid.is_some_and(|p| clients.iter().any(|c| c.pid == p)) {
+        return hook_pid;
+    }
+    codex::client_in(&clients, cwd).or(hook_pid)
+}
+
 /// "codex" → "Codex". Un agente que no conocemos se muestra con mayúscula.
 fn agent_display(name: &str) -> String {
     match installer::Agent::from_name(name) {
@@ -397,6 +421,7 @@ impl App {
         let hide = CheckMenuItem::new("Ocultar monitos", true, false, None);
         let notify = CheckMenuItem::new("Notificaciones", true, true, None);
         let update = MenuItem::new(update_label(self.available.as_deref()), true, None);
+        let restart = MenuItem::new("Reiniciar Claude Pet", true, None);
         let quit = MenuItem::new("Salir", true, None);
         // Avatar: uno fijo para todos, o aleatorio.
         let avatar_menu = Submenu::new("Avatar", true);
@@ -450,6 +475,7 @@ impl App {
             &notify,
             &PredefinedMenuItem::separator(),
             &update,
+            &restart,
             &quit,
         ]);
         let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Claude Pet");
@@ -470,6 +496,7 @@ impl App {
                 icons,
                 sizes,
                 update,
+                restart: restart.id().clone(),
                 quit: quit.id().clone(),
             });
         }
@@ -674,9 +701,38 @@ impl App {
         }
     }
 
+    /// Sesiones de Codex abiertas sin monito (por ejemplo, reanudadas sin
+    /// escribirles todavía). Solo mira el disco si hay un proceso de Codex sin monito.
+    fn scan_codex(&mut self, el: &ActiveEventLoop) {
+        let clients: Vec<_> = codex::clients()
+            .into_iter()
+            .filter(|c| !self.pets.iter().any(|pw| pw.pet.pid == Some(c.pid)))
+            .collect();
+        if clients.is_empty() {
+            return;
+        }
+        for s in codex::open_sessions(&clients) {
+            if self.scanned.contains(&s.id) || self.pets.iter().any(|pw| pw.pet.session == s.id) {
+                continue;
+            }
+            debug_log(format_args!("sesión de Codex abierta: {} en {} (pid {})", s.id, s.cwd, s.pid));
+            self.on_hook(
+                el,
+                serde_json::json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": s.id,
+                    "cwd": s.cwd,
+                    "pet_pid": s.pid,
+                    "agent": "codex",
+                }),
+            );
+        }
+    }
+
     fn on_hook(&mut self, el: &ActiveEventLoop, v: Value) {
         match v["cmd"].as_str() {
             Some("quit") => return el.exit(),
+            Some("restart") => return restart(el),
             Some("reload") => return self.reload_skins(),
             Some("size") => {
                 if let Some(px) = v["px"].as_u64() {
@@ -698,8 +754,10 @@ impl App {
             None if event == "SessionEnd" => return,
             None => {
                 self.scanned.insert(session.to_string());
-                debug_log(format_args!("monito nuevo: {session} ({agent}, {event})"));
-                let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""), &agent);
+                let cwd = v["cwd"].as_str().unwrap_or("");
+                let pid = if v["agent"] == "codex" { codex_pid(pid, cwd) } else { pid };
+                debug_log(format_args!("monito nuevo: {session} ({agent}, {event}, pid={pid:?})"));
+                let label = label_from_cwd(cwd, &agent);
                 match self.spawn_pet(el, session.to_string(), label, agent, pid) {
                     Some(i) => i,
                     None => return,
@@ -708,7 +766,9 @@ impl App {
         };
         let notifications = self.notifications_on();
         let pet = &mut self.pets[idx].pet;
-        if pid.is_some() {
+        // El primer PID manda: los hooks de Codex llegan con el del daemon,
+        // que no es el de la sesión.
+        if pet.pid.is_none() {
             pet.pid = pid;
         }
         match event {
@@ -792,6 +852,8 @@ impl App {
                 self.set_in_pool(&all, true);
             } else if let Some(k) = tray.sizes.iter().position(|item| *item.id() == ev.id) {
                 self.choose_size(SIZES[k].1);
+            } else if ev.id == tray.restart {
+                restart(el);
             } else if ev.id == tray.quit {
                 el.exit();
             } else if ev.id == *tray.update.id() {
@@ -859,6 +921,11 @@ impl App {
         if self.watcher.is_none() && now - self.last_scan > Duration::from_secs(3) {
             self.last_scan = now;
             self.scan_sessions(el);
+        }
+
+        if now - self.last_codex_scan > Duration::from_secs(15) {
+            self.last_codex_scan = now;
+            self.scan_codex(el);
         }
 
         if now - self.last_update_check > Duration::from_secs(6 * 60 * 60) {
@@ -1012,6 +1079,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_hook(el, demo_event(0));
         }
         self.scan_sessions(el);
+        self.scan_codex(el);
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
