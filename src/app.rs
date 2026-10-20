@@ -16,6 +16,7 @@ use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
+use crate::sound::{self, Cue};
 use crate::{codex, installer, ipc, skins, sprites, updater};
 
 /// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
@@ -68,6 +69,8 @@ struct PetWindow {
     last_pos: (i32, i32),
     /// Cuándo se apretó el último clic suelto, para reconocer el doble clic.
     last_click: Option<Instant>,
+    /// Cuándo sonó por última vez pidiendo atención (Codex pide permiso seguido).
+    last_alert: Option<Instant>,
 }
 
 struct Tray {
@@ -75,6 +78,7 @@ struct Tray {
     demo: MenuId,
     hide: CheckMenuItem,
     notify: CheckMenuItem,
+    sounds: CheckMenuItem,
     /// [0] = "Aleatorio"; [i + 1] = avatar i.
     avatars: Vec<CheckMenuItem>,
     /// [i] = avatar i entra en el aleatorio.
@@ -229,6 +233,7 @@ pub fn run(demo: bool, wait: bool) {
         let _ = proxy.lock().unwrap().send_event(UserEvent::Menu(e));
     }));
     pet::set_cell_px(load_cell_px());
+    sound::set_enabled(load_config()["sounds"].as_bool().unwrap_or(true));
     let n = skins::reload();
     debug_log(format_args!("{n} avatares en skins.json"));
 
@@ -422,6 +427,7 @@ impl App {
         let demo = MenuItem::new("Monito de prueba", true, None);
         let hide = CheckMenuItem::new("Ocultar monitos", true, false, None);
         let notify = CheckMenuItem::new("Notificaciones", true, true, None);
+        let sounds = CheckMenuItem::new("Sonidos", true, load_config()["sounds"].as_bool().unwrap_or(true), None);
         let update = MenuItem::new(update_label(self.available.as_deref()), true, None);
         let restart = MenuItem::new("Reiniciar Claude Pet", true, None);
         let quit = MenuItem::new("Salir", true, None);
@@ -475,6 +481,7 @@ impl App {
             &size_menu,
             &hide,
             &notify,
+            &sounds,
             &PredefinedMenuItem::separator(),
             &update,
             &restart,
@@ -491,6 +498,7 @@ impl App {
                 demo: demo.id().clone(),
                 hide,
                 notify,
+                sounds,
                 avatars,
                 pool,
                 pool_gens,
@@ -637,6 +645,7 @@ impl App {
         debug_log(format_args!("skins.json recargado: {n} avatares"));
         self.avatar_choice = load_avatar_choice();
         self.icon_choice = load_icon_choice();
+        sound::forget();
         if self.tray.is_some() {
             self.tray = None;
             self.build_tray();
@@ -682,6 +691,7 @@ impl App {
             last_frame: 0,
             last_pos: (i32::MIN, i32::MIN),
             last_click: None,
+            last_alert: None,
         });
         // Que el primer cuadro llegue ya y no simule el rato que el loop durmió.
         self.floors_at = Instant::now() - FLOORS_EVERY;
@@ -701,6 +711,7 @@ impl App {
                     "session_id": session,
                     "cwd": cwd,
                     "pet_pid": pid,
+                    "scan": true,
                 }),
             );
         }
@@ -729,6 +740,7 @@ impl App {
                     "cwd": s.cwd,
                     "pet_pid": s.pid,
                     "agent": "codex",
+                    "scan": true,
                 }),
             );
         }
@@ -754,8 +766,8 @@ impl App {
         let agent = agent_display(v["agent"].as_str().unwrap_or("claude"));
         debug_log(format_args!("hook {agent} {event} {session} pid={pid:?}"));
 
-        let idx = match self.pets.iter().position(|p| p.pet.session == session) {
-            Some(i) => i,
+        let (idx, created) = match self.pets.iter().position(|p| p.pet.session == session) {
+            Some(i) => (i, false),
             None if event == "SessionEnd" => return,
             None => {
                 self.scanned.insert(session.to_string());
@@ -764,12 +776,13 @@ impl App {
                 debug_log(format_args!("monito nuevo: {session} ({agent}, {event}, pid={pid:?})"));
                 let label = label_from_cwd(cwd, &agent);
                 match self.spawn_pet(el, session.to_string(), label, agent, cwd, pid) {
-                    Some(i) => i,
+                    Some(i) => (i, true),
                     None => return,
                 }
             }
         };
         let notifications = self.notifications_on();
+        let mut cue = None;
         let pet = &mut self.pets[idx].pet;
         // El primer PID manda: los hooks de Codex llegan con el del daemon,
         // que no es el de la sesión.
@@ -778,10 +791,14 @@ impl App {
         }
         match event {
             "UserPromptSubmit" => pet.on_prompt(),
-            "SubagentStart" => pet.add_kit(v["agent_id"].as_str(), v["agent_type"].as_str().unwrap_or("")),
+            "SubagentStart" => {
+                pet.add_kit(v["agent_id"].as_str(), v["agent_type"].as_str().unwrap_or(""));
+                cue = Some(Cue::Kit);
+            }
             "SubagentStop" => pet.remove_kit(v["agent_id"].as_str()),
             "Stop" => {
                 let took = pet.on_stop();
+                cue = Some(Cue::Done);
                 if notifications {
                     let body = match took {
                         Some(d) => format!("{} terminó en {}", pet.label, fmt_duration(d)),
@@ -797,6 +814,7 @@ impl App {
                     pet.on_waiting();
                 } else {
                     pet.on_attention(msg);
+                    cue = Some(Cue::Attention);
                     if notifications {
                         notify(format!("🔔 {}", pet.label), msg.to_string());
                     }
@@ -807,6 +825,24 @@ impl App {
         }
         if event == "Stop" {
             self.cheer_around(idx);
+        }
+        // Una sesión nueva saluda con su grito, salvo que ya traiga el suyo.
+        if created && cue.is_none() && event != "SubagentStop" {
+            cue = Some(Cue::Appear);
+        }
+        // Los escaneos (arranque, reinicio, sesiones ya abiertas) no suenan.
+        if v["scan"].as_bool() == Some(true) {
+            return;
+        }
+        let pw = &mut self.pets[idx];
+        if cue == Some(Cue::Attention) {
+            if pw.last_alert.is_some_and(|t| t.elapsed() < Duration::from_secs(20)) {
+                return;
+            }
+            pw.last_alert = Some(Instant::now());
+        }
+        if let Some(cue) = cue {
+            sound::play(pw.avatar, cue);
         }
     }
 
@@ -887,6 +923,10 @@ impl App {
                 self.demo_count += 1;
                 let v = demo_event(self.demo_count);
                 self.on_hook(el, v);
+            } else if ev.id == *tray.sounds.id() {
+                let on = tray.sounds.is_checked();
+                sound::set_enabled(on);
+                save_config("sounds", on.into());
             } else if ev.id == *tray.hide.id() {
                 self.hidden = tray.hide.is_checked();
                 for pw in &mut self.pets {

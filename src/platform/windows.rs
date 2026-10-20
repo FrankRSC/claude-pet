@@ -330,6 +330,37 @@ pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
     None
 }
 
+/// El WAV que está tocando: PlaySound lee de esta memoria mientras suena.
+static PLAYING: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// Toca un WAV en memoria sin bloquear (corta el anterior). Devuelve si empezó.
+pub fn play_wav(wav: Vec<u8>) -> bool {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+    let mut current = PLAYING.lock().unwrap();
+    unsafe {
+        // Primero se corta el anterior: si no, su memoria se liberaría sonando.
+        PlaySoundW(null(), null_mut(), 0);
+        *current = wav;
+        PlaySoundW(current.as_ptr() as *const u16, null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) != 0
+    }
+}
+
+/// Toca un sonido del sistema (los del Panel de control > Sonido).
+pub fn play_system(sound: super::SystemSound) {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+    let alias = wide(match sound {
+        super::SystemSound::Pop => "SystemNotification",
+        super::SystemSound::Done => "SystemAsterisk",
+        super::SystemSound::Alert => "SystemExclamation",
+    });
+    let mut current = PLAYING.lock().unwrap();
+    unsafe {
+        PlaySoundW(null(), null_mut(), 0);
+        current.clear();
+        PlaySoundW(alias.as_ptr(), null_mut(), SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
+}
+
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

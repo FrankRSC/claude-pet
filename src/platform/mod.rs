@@ -3,6 +3,17 @@
 //! `find_agent_pid`, `processes_named`, `spawn_detached`, `set_autostart`,
 //! `attach_console`, `window_attributes`.
 
+/// Sonidos del sistema, para el Monito y los avatares sin grito.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemSound {
+    /// Aparece algo (sesión nueva, cría).
+    Pop,
+    /// Terminó una tarea.
+    Done,
+    /// Pide atención.
+    Alert,
+}
+
 /// Un proceso visto desde fuera, lo justo para reconocer la sesión de un agente.
 #[derive(Clone, Debug)]
 pub struct ProcInfo {

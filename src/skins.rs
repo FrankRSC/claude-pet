@@ -65,9 +65,14 @@ pub fn generation(id: u32) -> Option<u32> {
     GENERATIONS.iter().position(|(a, b)| (*a..=*b).contains(&id)).map(|i| i as u32 + 1)
 }
 
+/// Carpeta de datos de la app (config.json, skins.json, cries/).
+pub fn dir() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("claude-pet"))
+}
+
 /// Donde la app busca los avatares: junto a `config.json`.
 pub fn path() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("claude-pet").join("skins.json"))
+    Some(dir()?.join("skins.json"))
 }
 
 /// Lo que haya cargado, bajo un candado de lectura.
@@ -229,6 +234,17 @@ pub fn install(src: &Path) {
         return eprintln!("No pude escribir {}: {e}", dst.display());
     }
     println!("{} avatares en {}", skins.len(), dst.display());
+    // Los gritos que bajó tools/pokedex.py viven en cries/ junto al JSON.
+    let cries = src.parent().unwrap_or(Path::new(".")).join("cries");
+    if let (Ok(entries), Some(to)) = (std::fs::read_dir(&cries), dst.parent().map(|d| d.join("cries"))) {
+        let _ = std::fs::create_dir_all(&to);
+        let copied = entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "ogg"))
+            .filter(|e| std::fs::copy(e.path(), to.join(e.file_name())).is_ok())
+            .count();
+        println!("{copied} gritos en {}", to.display());
+    }
     let msg = serde_json::json!({ "cmd": "reload" });
     if crate::ipc::send(&msg, std::time::Duration::from_millis(500)) {
         println!("Claude Pet ya los tiene; están en el menú Avatar.");

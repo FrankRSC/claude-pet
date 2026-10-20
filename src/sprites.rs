@@ -226,6 +226,14 @@ pub fn name(index: usize) -> String {
     }
 }
 
+/// Número de Pokédex del avatar (None para el Monito o si el archivo no lo trae).
+pub fn id(index: usize) -> Option<u32> {
+    match index {
+        0 => None,
+        i => skins::with(|s| s.get(i - 1).and_then(|k| k.id)),
+    }
+}
+
 /// Generación del Pokémon (por su número), para agrupar el menú. None para el
 /// Monito y los avatares sin `id`.
 pub fn generation(index: usize) -> Option<u32> {

@@ -473,6 +473,48 @@ pub fn focus_session(pid: u32, cwd: &str) -> Option<String> {
     Some(bundle)
 }
 
+thread_local! {
+    /// Sonidos que siguen tocando; se sueltan cuando terminan. Solo se toca
+    /// desde el hilo principal.
+    static PLAYING: std::cell::RefCell<Vec<objc2::rc::Retained<AnyObject>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Toca un WAV en memoria sin bloquear. Devuelve si empezó a sonar.
+pub fn play_wav(wav: Vec<u8>) -> bool {
+    objc2::rc::autoreleasepool(|_| unsafe {
+        PLAYING.with_borrow_mut(|list| list.retain(|s| msg_send![&**s, isPlaying]));
+        let data: *mut AnyObject =
+            msg_send![class!(NSData), dataWithBytes: wav.as_ptr() as *const libc::c_void, length: wav.len()];
+        let alloc: objc2::rc::Allocated<AnyObject> = msg_send![class!(NSSound), alloc];
+        let sound: Option<objc2::rc::Retained<AnyObject>> = msg_send![alloc, initWithData: data];
+        let Some(sound) = sound else { return false };
+        let started: bool = msg_send![&*sound, play];
+        if started {
+            PLAYING.with_borrow_mut(|list| list.push(sound));
+        }
+        started
+    })
+}
+
+/// Toca un sonido del sistema (los de Preferencias > Sonido).
+pub fn play_system(sound: super::SystemSound) {
+    let name = match sound {
+        super::SystemSound::Pop => c"Pop",
+        super::SystemSound::Done => c"Glass",
+        super::SystemSound::Alert => c"Funk",
+    };
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let ns: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+        let sound: *mut AnyObject = msg_send![class!(NSSound), soundNamed: ns];
+        if sound.is_null() {
+            return;
+        }
+        let _: bool = msg_send![sound, stop];
+        let _: () = msg_send![sound, setVolume: 0.6f32];
+        let _: bool = msg_send![sound, play];
+    });
+}
+
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
     let _ = Command::new(exe)
         .args(args)

@@ -4,13 +4,14 @@
 Toma el icono de menú de Generación VII (40×30, ya es pixel art con fondo
 transparente), lo recorta, lo encaja en una rejilla de GRID×GRID, cuantiza la
 paleta, busca los ojos y lo escribe en el formato de avatar de la app (filas de
-caracteres + paleta + celdas de ojos), el que lee `src/skins.rs`.
+caracteres + paleta + celdas de ojos), el que lee `src/skins.rs`. También baja
+el grito de cada uno a cries/{id}.ogg junto al JSON.
 
 Uso:
   python3 tools/pokedex.py --gen 1                       # los 151 de Kanto
   python3 tools/pokedex.py --ids 1,4,7,25 --preview out.png
   python3 tools/pokedex.py --ids 1-151 --grid 16         # rejilla chica
-  claude-pet skins skins.json                            # instalarlo
+  claude-pet skins skins.json                            # instalarlo (con los gritos)
 
 Requiere Pillow (`pip install pillow` o `uv pip install pillow`). Las descargas
 se guardan en tools/.cache/ para no repetirlas. Los sprites son propiedad de
@@ -26,6 +27,9 @@ from pathlib import Path
 from PIL import Image
 
 ICON = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-vii/icons/{id}.png"
+# Gritos en Ogg Vorbis (~7 KB). "latest" son los de los juegos nuevos; "legacy",
+# los originales, que algunos Pokémon nuevos no tienen.
+CRY = "https://raw.githubusercontent.com/PokeAPI/cries/main/cries/pokemon/{kind}/{id}.ogg"
 API = "https://pokeapi.co/api/v2/"
 GENS = {1: (1, 151), 2: (152, 251), 3: (252, 386), 4: (387, 493), 5: (494, 649),
         6: (650, 721), 7: (722, 809), 8: (810, 905), 9: (906, 1025)}
@@ -43,6 +47,20 @@ def get(url: str) -> bytes:
     data = urllib.request.urlopen(req, timeout=30).read()
     key.write_bytes(data)
     return data
+
+
+def cry(pid: int):
+    """El grito del Pokémon en Ogg Vorbis, o None si PokeAPI no lo tiene. Algunos
+    "latest" son MP3 con extensión .ogg (Pikachu): la app solo decodifica
+    Vorbis, así que se prueba el siguiente."""
+    for kind in ("latest", "legacy"):
+        try:
+            data = get(CRY.format(kind=kind, id=pid))
+        except Exception:
+            continue
+        if data[:4] == b"OggS" and b"vorbis" in data[:64]:
+            return data
+    return None
 
 
 def spanish_name(pid: int) -> str:
@@ -205,6 +223,7 @@ def main() -> int:
     ap.add_argument("--preview", help="PNG con todos los avatares generados")
     ap.add_argument("--no-names", action="store_true", help="no consultar nombres en PokeAPI")
     ap.add_argument("--no-eyes", action="store_true", help="no buscar ojos (no parpadean)")
+    ap.add_argument("--no-cries", action="store_true", help="no bajar los gritos (sin sonidos de Pokémon)")
     args = ap.parse_args()
 
     ids = parse_ids(args.ids) if args.ids else []
@@ -219,6 +238,8 @@ def main() -> int:
 
     skins = []
     with_eyes = 0
+    cries_dir = Path(args.out).resolve().parent / "cries"
+    cries = 0
     for pid in ids:
         try:
             im = Image.open(io.BytesIO(get(ICON.format(id=pid))))
@@ -234,10 +255,18 @@ def main() -> int:
             skin["eyes"] = [list(p) for p in eyes]
             with_eyes += 1
         skins.append(skin)
+        if not args.no_cries:
+            data = cry(pid)
+            if data:
+                cries_dir.mkdir(exist_ok=True)
+                (cries_dir / f"{pid}.ogg").write_bytes(data)
+                cries += 1
         print(f"#{pid:04d} {name}: {len(palette)} colores" + (f", ojos en {eyes}" if eyes else ""))
 
     Path(args.out).write_text(json.dumps({"grid": args.grid, "skins": skins}, ensure_ascii=False, indent=1) + "\n")
     print(f"{len(skins)} avatares en {args.out} ({with_eyes} con ojos)")
+    if not args.no_cries:
+        print(f"{cries} gritos en {cries_dir}")
 
     if args.preview and skins:
         scale, cols, pad = 6, 10, 8
