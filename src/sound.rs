@@ -68,11 +68,16 @@ pub fn play(index: usize, cue: Cue) {
         }
         *last = Some(Instant::now());
     }
-    match sprites::id(index).and_then(cry) {
+    let id = sprites::id(index);
+    match id.and_then(cry) {
         Some(pcm) => {
-            platform::play_wav(wav(&pcm, cue.volume()));
+            let ok = platform::play_wav(wav(&pcm, cue.volume()));
+            crate::app::debug_log(format_args!("sonido {cue:?}: grito #{} ({})", id.unwrap_or(0), if ok { "suena" } else { "falló" }));
         }
-        None => platform::play_system(cue.system()),
+        None => {
+            platform::play_system(cue.system());
+            crate::app::debug_log(format_args!("sonido {cue:?}: del sistema"));
+        }
     }
 }
 
