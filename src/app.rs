@@ -773,6 +773,8 @@ impl App {
         }
         match event {
             "UserPromptSubmit" => pet.on_prompt(),
+            "SubagentStart" => pet.add_kit(v["agent_id"].as_str(), v["agent_type"].as_str().unwrap_or("")),
+            "SubagentStop" => pet.remove_kit(v["agent_id"].as_str()),
             "Stop" => {
                 let took = pet.on_stop();
                 if notifications {

@@ -109,6 +109,8 @@ impl Agent {
                 ("Stop", 10),
                 ("Notification", 10),
                 ("SessionEnd", 10),
+                ("SubagentStart", 10),
+                ("SubagentStop", 10),
             ],
             // Codex admite 3 s como máximo en SessionEnd.
             Agent::Codex => &[
@@ -117,6 +119,8 @@ impl Agent {
                 ("Stop", 10),
                 ("PermissionRequest", 10),
                 ("SessionEnd", 3),
+                ("SubagentStart", 10),
+                ("SubagentStop", 10),
             ],
             Agent::Gemini => &[
                 ("SessionStart", 10_000),
@@ -356,6 +360,7 @@ mod tests {
         assert_eq!(s["model"], "x");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 2, "el hook ajeno sigue ahí");
         assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 10);
+        assert!(s["hooks"]["SubagentStart"].is_array() && s["hooks"]["SubagentStop"].is_array(), "crías");
         assert!(s["hooks"]["SessionStart"][0].get("matcher").is_none());
 
         // Instalar dos veces no duplica.
@@ -371,6 +376,7 @@ mod tests {
         Agent::Codex.add_hooks(&mut only_ours, "\"/x/claude-pet\" hook --agent codex");
         assert_eq!(only_ours["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], "\"/x/claude-pet\" hook --agent codex");
         assert_eq!(only_ours["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+        assert!(only_ours["hooks"]["SubagentStop"].is_array());
         Agent::Codex.strip_hooks(&mut only_ours);
         assert_eq!(only_ours, json!({}));
     }

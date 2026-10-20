@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
 
-use crate::pet::{cell_px, size, Emote, Mode, Pet, Wall, MAX_CELL};
+use crate::pet::{cell_px, size, Emote, Mode, Pet, Wall, KITS_SHOWN, MAX_CELL};
 use crate::sprites::{Grid, Look, Pose, GRID};
 
 /// Lado del buffer/ventana: alcanza para el tamaño más grande con aire para el
@@ -144,6 +144,24 @@ fn emote_now(pet: &Pet, orient: Orient) -> Option<(Emote, i32)> {
     Some((e, step))
 }
 
+/// Las crías se ven con el padre de pie y quieto en su lugar (no al volar,
+/// trepar o irse).
+fn kits_visible(pet: &Pet, orient: Orient) -> bool {
+    !pet.kits.is_empty()
+        && matches!(orient, Orient::Up)
+        && !matches!(pet.mode, Mode::Dragged | Mode::Falling | Mode::Leaving)
+}
+
+/// Paso del brinco de las crías: el mismo que el del padre al caminar (−1 si
+/// no camina), así no agregan cuadros.
+fn kit_step(pet: &Pet) -> i32 {
+    if pet.mode != Mode::Walking {
+        return -1;
+    }
+    let step = if pet.busy() { 0.14 } else { 0.25 };
+    (pet.anim / step) as i32 % 2
+}
+
 /// Primera fila con algo dibujado (la coronilla).
 fn top_row(frame: &Grid) -> usize {
     frame.iter().position(|r| r.iter().any(Option::is_some)).unwrap_or(0)
@@ -229,6 +247,9 @@ impl Renderer {
         ((pet.alpha * 255.0) as u8).hash(&mut h);
         ((squash_for(pet, pose) * 40.0).round() as i32).hash(&mut h);
         emote_now(pet, orient).hash(&mut h);
+        if kits_visible(pet, orient) {
+            (pet.kits.len(), kit_step(pet)).hash(&mut h);
+        }
         match &pet.bubble {
             Some((text, _)) => text.hash(&mut h),
             None if pet.busy() => ((pet.anim * 4.0) as i32 % 3).hash(&mut h),
@@ -247,6 +268,9 @@ impl Renderer {
         let flip = pet.facing_left() && matches!(orient, Orient::Up | Orient::Ceiling);
         let base = off() as i32;
         let upright = matches!(orient, Orient::Up);
+        if kits_visible(pet, orient) {
+            self.draw_kits(buf, pet, look);
+        }
         if upright {
             draw_grid(buf, frame, flip, sprite_rect(squash_for(pet, pose)), pet.alpha);
         } else {
@@ -288,6 +312,45 @@ impl Renderer {
         }
         if let Some((e, step)) = emote_now(pet, orient) {
             draw_emote(buf, e, step, frame, pet.alpha);
+        }
+    }
+
+    /// Las crías van detrás del padre (las dos primeras) y luego delante, a la
+    /// mitad de su tamaño y sobre el mismo piso. Las que no caben completas en
+    /// la ventana, o pasan de cuatro, se cuentan en un "+N" sobre la primera.
+    fn draw_kits(&mut self, buf: &mut [u32], pet: &Pet, look: &Look) {
+        let ks = size() * 0.5;
+        let gap = ks * 0.1;
+        let behind = if pet.facing_left() { 1.0 } else { -1.0 };
+        let center = off() + size() / 2.0;
+        let floor = off() + size();
+        let step = kit_step(pet);
+        let frame = look.frame(match pet.mode {
+            Mode::Sitting => Pose::Sit,
+            Mode::Sleeping => Pose::Sleep,
+            _ => Pose::Stand,
+        });
+        let slots = [(behind, 0.0), (behind, 1.0), (-behind, 0.0), (-behind, 1.0)];
+        let mut drawn = 0;
+        let mut first = None;
+        for (side, rank) in slots {
+            if drawn == pet.kits.len().min(KITS_SHOWN) {
+                break;
+            }
+            let cx = center + side * (size() / 2.0 + gap + ks / 2.0 + rank * (ks + gap));
+            if cx - ks / 2.0 < 0.0 || cx + ks / 2.0 > BUF as f32 {
+                continue;
+            }
+            let up = step >= 0 && (step + drawn as i32) % 2 == 1;
+            let hop = if up { ks / GRID as f32 * 2.0 } else { 0.0 };
+            draw_grid(buf, frame, pet.facing_left(), (cx - ks / 2.0, floor - ks - hop, ks, ks), pet.alpha);
+            first.get_or_insert(cx);
+            drawn += 1;
+        }
+        if pet.kits.len() > drawn {
+            let text = format!("+{}", pet.kits.len() - drawn);
+            let x = first.unwrap_or(center) - self.text_width(&text) / 2.0;
+            self.draw_text(buf, &text, x, floor - ks - 6.0, INK, pet.alpha);
         }
     }
 
@@ -388,6 +451,25 @@ mod tests {
     }
 
     #[test]
+    fn kits_are_drawn_beside_and_counted() {
+        let mut r = Renderer::new();
+        let look = sprites::look(0, CLAUDE_ORANGE);
+        let mut p = pet(Mode::Idle, 1.0);
+        let alone = render(&mut r, &p, &look);
+        let key = Renderer::visual_key(&p, true);
+        p.add_kit(Some("a"), "Explore");
+        p.bubble = None;
+        assert_ne!(Renderer::visual_key(&p, true), key);
+        let with_kit = render(&mut r, &p, &look);
+        let (a, b) = (bounds(&alone), bounds(&with_kit));
+        assert!(b.1 - b.0 > a.1 - a.0, "la cría ensancha lo dibujado");
+        assert_eq!(a.2, b.2, "y pisa el mismo suelo");
+        // Volando no se ven.
+        p.mode = Mode::Falling;
+        assert_eq!(bounds(&render(&mut r, &p, &look)).0, a.0);
+    }
+
+    #[test]
     fn emotes_change_the_frame() {
         let look = sprites::look(0, CLAUDE_ORANGE);
         let calm = pet(Mode::Idle, 1.0);
@@ -440,11 +522,27 @@ mod tests {
                 p
             })),
             ("duerme", Box::new(|| pet(Mode::Sleeping, 0.5))),
+            ("3 crías", Box::new(|| {
+                let mut p = pet(Mode::Walking, 0.0);
+                for k in ["a", "b", "c"] {
+                    p.add_kit(Some(k), "Explore");
+                }
+                p.bubble = None;
+                p
+            })),
+            ("6 crías", Box::new(|| {
+                let mut p = pet(Mode::Idle, 1.0);
+                for k in ["a", "b", "c", "d", "e", "f"] {
+                    p.add_kit(Some(k), "Plan");
+                }
+                p.bubble = None;
+                p
+            })),
         ];
         let avatars: Vec<usize> = if sprites::count() > 1 { vec![0, 1] } else { vec![0] };
         let (s, o) = (size() as usize, off() as usize);
-        let (tw, th) = (s * 2, s * 2);
-        let (x0, y0) = (o - s / 2, o - s);
+        let (tw, th) = (s * 7 / 2, s * 2);
+        let (x0, y0) = (o + s / 2 - tw / 2, o - s);
         let w = shots.len() * tw;
         let h = avatars.len() * th;
         let bg = [52u8, 55, 68];

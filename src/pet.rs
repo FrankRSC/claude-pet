@@ -120,7 +120,22 @@ pub struct Pet {
     love: f32,
     /// Segundos antes de poder volver a saludar.
     greet_cd: f32,
+    /// Subagentes en curso: crías que lo siguen.
+    pub kits: Vec<Kit>,
 }
+
+/// Un subagente del agente de este monito.
+#[derive(Clone, Debug)]
+pub struct Kit {
+    pub id: String,
+    pub kind: String,
+    born: Instant,
+}
+
+/// Más crías que esto no se dibujan: se resumen con "+N".
+pub const KITS_SHOWN: usize = 4;
+/// Una cría de la que nunca llegó el SubagentStop se descarta.
+const KIT_MAX_AGE: Duration = Duration::from_secs(3600);
 
 /// Iconito sobre la cabeza que dice cómo está, sin texto.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -215,6 +230,7 @@ impl Pet {
             waiting: 0.0,
             love: 0.0,
             greet_cd: 20.0,
+            kits: Vec::new(),
         };
         pet.x = area.l + pet.rand() * (area.r - area.l - size()).max(0.0);
         pet.dir = if pet.rand() < 0.5 { -1.0 } else { 1.0 };
@@ -328,7 +344,33 @@ impl Pet {
         self.waiting = 10.0;
     }
 
+    /// Nace una cría (SubagentStart). Sin id, se inventa uno; repetido, se ignora.
+    pub fn add_kit(&mut self, id: Option<&str>, kind: &str) {
+        let id = id.map_or_else(|| format!("sin-id-{}", self.kits.len()), str::to_string);
+        if self.kits.iter().any(|k| k.id == id) {
+            return;
+        }
+        let kind = if kind.trim().is_empty() { "subagente" } else { kind.trim() };
+        self.kits.push(Kit { id, kind: kind.to_string(), born: Instant::now() });
+        self.say(format!("+ {kind}"), 1.5);
+    }
+
+    /// Se va una cría (SubagentStop): la de ese id, o la más vieja si no hay id.
+    pub fn remove_kit(&mut self, id: Option<&str>) {
+        let pos = match id {
+            Some(id) => self.kits.iter().position(|k| k.id == id),
+            None => (!self.kits.is_empty()).then_some(0),
+        };
+        if let Some(i) = pos {
+            let kit = self.kits.remove(i);
+            if self.bubble.is_none() {
+                self.say(format!("✓ {}", kit.kind), 1.2);
+            }
+        }
+    }
+
     pub fn on_end(&mut self) {
+        self.kits.clear();
         if self.mode != Mode::Leaving {
             self.say("¡Adiós!", 2.0);
             self.mode = Mode::Leaving;
@@ -361,7 +403,12 @@ impl Pet {
     }
 
     pub fn on_click(&mut self) {
-        let text = format!("{} · {} · {}", self.label, self.agent, self.status());
+        let mut text = format!("{} · {} · {}", self.label, self.agent, self.status());
+        match self.kits.len() {
+            0 => {}
+            1 => text.push_str(" · 1 cría"),
+            n => text.push_str(&format!(" · {n} crías")),
+        }
         self.say(text, 4.0);
         if self.mode == Mode::Sleeping {
             self.idle(1.0);
@@ -492,6 +539,9 @@ impl Pet {
         self.waiting = (self.waiting - dt).max(0.0);
         self.love = (self.love - dt).max(0.0);
         self.greet_cd -= dt;
+        if !self.kits.is_empty() {
+            self.kits.retain(|k| k.born.elapsed() < KIT_MAX_AGE);
+        }
         if self.squash != 0.0 {
             self.squash *= (-12.0 * dt).exp();
             if self.squash.abs() < 0.01 {
@@ -932,6 +982,23 @@ mod tests {
         busy.on_prompt();
         busy.cheer();
         assert_eq!(busy.mode, Mode::Walking);
+    }
+
+    #[test]
+    fn kits_come_and_go_by_id() {
+        let mut p = pet_at(400.0, SCREEN.b - size());
+        p.add_kit(Some("a"), "Explore");
+        p.add_kit(Some("a"), "Explore");
+        p.add_kit(Some("b"), " ");
+        p.add_kit(None, "Plan");
+        assert_eq!(p.kits.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>(), ["Explore", "subagente", "Plan"]);
+        p.remove_kit(Some("b"));
+        p.remove_kit(Some("no-existe"));
+        assert_eq!(p.kits.len(), 2);
+        p.remove_kit(None);
+        assert_eq!(p.kits[0].kind, "Plan", "sin id se va la más vieja");
+        p.on_end();
+        assert!(p.kits.is_empty(), "al cerrar la sesión no quedan crías");
     }
 
     #[test]

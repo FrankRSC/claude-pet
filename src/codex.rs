@@ -77,14 +77,34 @@ fn rollouts(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
     out
 }
 
-/// (id del hilo, carpeta) de la primera línea del rollout (`session_meta`).
-fn meta(path: &Path) -> Option<(String, String)> {
+/// Lo que dice la primera línea de un rollout (`session_meta`).
+#[derive(Debug, PartialEq)]
+struct Meta {
+    id: String,
+    cwd: String,
+    /// Solo la cabecera: Codex crea un hilo así al abrir, aunque luego
+    /// reanudes otro.
+    empty: bool,
+}
+
+/// None si no es un hilo de una persona (los subagentes tienen
+/// `thread_source` distinto de "user").
+fn meta(path: &Path) -> Option<Meta> {
     let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
     let mut line = Vec::new();
     BufReader::new(file.take(4 << 20)).read_until(b'\n', &mut line).ok()?;
     let v: Value = serde_json::from_slice(&line).ok()?;
     let p = &v["payload"];
-    Some((p["id"].as_str()?.to_string(), p["cwd"].as_str()?.to_string()))
+    let by_person = p["thread_source"].as_str().is_none_or(|s| s == "user") && !p["source"].is_object();
+    if !by_person {
+        return None;
+    }
+    Some(Meta {
+        id: p["id"].as_str()?.to_string(),
+        cwd: p["cwd"].as_str()?.to_string(),
+        empty: len <= line.len() as u64,
+    })
 }
 
 /// Igual, o la misma carpeta por otro camino (/tmp y /private/tmp en macOS).
@@ -94,17 +114,21 @@ fn same_dir(a: &str, b: &str) -> bool {
     a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
-/// Un hilo visto en disco: id, carpeta y cuándo se escribió por última vez.
+/// Un hilo visto en disco: id, carpeta, cuándo se escribió por última vez y
+/// si solo tiene la cabecera.
 struct Thread {
     id: String,
     cwd: String,
     modified: u64,
+    empty: bool,
 }
 
 /// A cada cliente (del más nuevo al más viejo) le toca el hilo más reciente de
-/// su carpeta escrito desde que arrancó (con 2 s de margen), sin repetir.
+/// su carpeta escrito desde que arrancó (con 2 s de margen), sin repetir. Un
+/// hilo con conversación gana al vacío que Codex crea al abrir: si reanudaste
+/// otro, ese es el tuyo.
 fn assign(clients: &[ProcInfo], mut threads: Vec<Thread>) -> Vec<Session> {
-    threads.sort_by(|a, b| b.modified.cmp(&a.modified));
+    threads.sort_by(|a, b| (a.empty, b.modified).cmp(&(b.empty, a.modified)));
     let mut clients: Vec<&ProcInfo> = clients.iter().filter(|c| c.cwd.is_some()).collect();
     clients.sort_by(|a, b| b.started.cmp(&a.started));
     let mut taken = HashSet::new();
@@ -114,8 +138,7 @@ fn assign(clients: &[ProcInfo], mut threads: Vec<Thread>) -> Vec<Session> {
         let since = c.started.saturating_sub(2);
         let found = threads
             .iter()
-            .take_while(|t| t.modified >= since)
-            .find(|t| !taken.contains(&t.id) && same_dir(&t.cwd, cwd));
+            .find(|t| t.modified >= since && !taken.contains(&t.id) && same_dir(&t.cwd, cwd));
         if let Some(t) = found {
             taken.insert(t.id.clone());
             out.push(Session { id: t.id.clone(), cwd: t.cwd.clone(), pid: c.pid });
@@ -136,10 +159,11 @@ pub fn open_sessions(clients: &[ProcInfo]) -> Vec<Session> {
         if modified < since {
             continue;
         }
-        let Some((id, cwd)) = meta(&path) else { continue };
+        let Some(Meta { id, cwd, empty }) = meta(&path) else { continue };
         let modified = modified.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let t = threads.entry(id.clone()).or_insert(Thread { id, cwd, modified });
+        let t = threads.entry(id.clone()).or_insert(Thread { id, cwd, modified, empty });
         t.modified = t.modified.max(modified);
+        t.empty &= empty;
     }
     assign(&clients, threads.into_values().collect())
 }
@@ -153,7 +177,7 @@ mod tests {
     }
 
     fn thread(id: &str, cwd: &str, modified: u64) -> Thread {
-        Thread { id: id.into(), cwd: cwd.into(), modified }
+        Thread { id: id.into(), cwd: cwd.into(), modified, empty: false }
     }
 
     #[test]
@@ -174,16 +198,32 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_thread_beats_the_empty_one_codex_opens() {
+        let clients = [client(10, "/p/a", 1000)];
+        let fresh = Thread { empty: true, ..thread("vacío", "/p/a", 1001) };
+        let got = assign(&clients, vec![fresh, thread("reanudado", "/p/a", 1003)]);
+        assert_eq!(got[0].id, "reanudado");
+        // Sin otro hilo, el vacío es el de esa TUI (aún sin prompt).
+        let fresh = Thread { empty: true, ..thread("vacío", "/p/a", 1001) };
+        assert_eq!(assign(&clients, vec![fresh])[0].id, "vacío");
+    }
+
+    #[test]
     fn services_are_not_clients_and_reads_rollout_meta() {
         let dir = std::env::temp_dir().join(format!("claude-pet-codex-{}", std::process::id()));
         let day = dir.join("2026/10/19");
         std::fs::create_dir_all(&day).unwrap();
         let file = day.join("rollout-2026-10-19T10-00-00-abc.jsonl");
-        std::fs::write(&file, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/p/a\"}}\n{\"x\":1}\n").unwrap();
+        std::fs::write(&file, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/p/a\",\"thread_source\":\"user\"}}\n{\"x\":1}\n").unwrap();
+        let empty = day.join("rollout-2026-10-19T10-00-01-vacio.jsonl");
+        std::fs::write(&empty, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"vacio\",\"cwd\":\"/p/a\"}}\n").unwrap();
+        let sub = day.join("rollout-2026-10-19T10-00-02-sub.jsonl");
+        std::fs::write(&sub, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sub\",\"cwd\":\"/p/a\",\"thread_source\":\"subagent\"}}\n{}\n").unwrap();
         std::fs::write(day.join("otro.txt"), "no").unwrap();
-        let found = rollouts(&dir);
-        assert_eq!(found.len(), 1);
-        assert_eq!(meta(&found[0].0), Some(("abc".into(), "/p/a".into())));
+        assert_eq!(rollouts(&dir).len(), 3);
+        assert_eq!(meta(&file), Some(Meta { id: "abc".into(), cwd: "/p/a".into(), empty: false }));
+        assert_eq!(meta(&empty).map(|m| m.empty), Some(true));
+        assert_eq!(meta(&sub), None, "los hilos de subagentes no son sesiones");
         std::fs::remove_dir_all(&dir).unwrap();
 
         let is_service = |args: &[&str]| args.iter().skip(1).any(|a| SERVICES.contains(a));
