@@ -392,7 +392,7 @@ pub fn icon_rgba(index: usize, tint: Color) -> (Vec<u8>, u32, u32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn skin(rows: &[&str], eyes: &[(usize, usize)]) -> Skin {
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// PNG mínimo sin compresión (bloques "stored" de deflate).
-    fn encode_png(w: usize, h: usize, rgb: &[[u8; 3]]) -> Vec<u8> {
+    pub(crate) fn encode_png(w: usize, h: usize, rgb: &[[u8; 3]]) -> Vec<u8> {
         fn crc32(data: &[u8]) -> u32 {
             let mut c = 0xffff_ffffu32;
             for &b in data {

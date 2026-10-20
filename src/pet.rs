@@ -112,7 +112,29 @@ pub struct Pet {
     /// Segundos que le quedan persiguiendo al cursor.
     chase: f32,
     rng: u64,
+    /// Aplastado (+) o estirado (−) al aterrizar y al saltar; vuelve solo a 0.
+    pub squash: f32,
+    /// Segundos que le quedan mostrando "?" (el agente espera tu respuesta).
+    waiting: f32,
 }
+
+/// Iconito sobre la cabeza que dice cómo está, sin texto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Emote {
+    /// Necesita tu atención.
+    Bang,
+    /// Espera tu respuesta.
+    Question,
+    /// Le pasas el cursor encima.
+    Heart,
+    /// Está festejando.
+    Note,
+    /// Lleva mucho trabajando.
+    Sweat,
+}
+
+/// Desde cuándo una tarea larga le saca una gota de sudor.
+const LONG_TASK: Duration = Duration::from_secs(180);
 
 pub fn hash(s: &str) -> u64 {
     // FNV-1a: estable entre ejecuciones, así cada sesión conserva su color.
@@ -159,6 +181,8 @@ impl Pet {
             hover: false,
             chase: 0.0,
             rng: h | 1,
+            squash: 0.0,
+            waiting: 0.0,
         };
         pet.x = area.l + pet.rand() * (area.r - area.l - size()).max(0.0);
         pet.dir = if pet.rand() < 0.5 { -1.0 } else { 1.0 };
@@ -268,7 +292,8 @@ impl Pet {
     }
 
     pub fn on_waiting(&mut self) {
-        self.say("te espero…", 5.0);
+        self.say("te espero…", 3.0);
+        self.waiting = 10.0;
     }
 
     pub fn on_end(&mut self) {
@@ -287,6 +312,19 @@ impl Pet {
             (_, Some(t)) => format!("trabajando… {}", fmt_duration(t.elapsed())),
             (Mode::Sleeping, _) => "zzz".into(),
             _ => "esperando".into(),
+        }
+    }
+
+    /// El iconito que le toca según lo que está haciendo.
+    pub fn emote(&self) -> Option<Emote> {
+        match self.mode {
+            Mode::Leaving | Mode::Dragged | Mode::Falling => None,
+            Mode::Attention => Some(Emote::Bang),
+            Mode::Celebrating => Some(Emote::Note),
+            Mode::Idle | Mode::Walking | Mode::Sitting if self.hover => Some(Emote::Heart),
+            _ if self.waiting > 0.0 => Some(Emote::Question),
+            _ if self.busy_since.is_some_and(|t| t.elapsed() > LONG_TASK) => Some(Emote::Sweat),
+            _ => None,
         }
     }
 
@@ -347,6 +385,7 @@ impl Pet {
         self.perch = None;
         self.vx = vx;
         self.vy = vy;
+        self.squash = -0.12;
         self.say("¡Ay!", 1.2);
     }
 
@@ -400,6 +439,13 @@ impl Pet {
         let a = area_at(w.areas, self.x + size() / 2.0, self.y + size() / 2.0);
         self.timer -= dt;
         self.chase -= dt;
+        self.waiting = (self.waiting - dt).max(0.0);
+        if self.squash != 0.0 {
+            self.squash *= (-12.0 * dt).exp();
+            if self.squash.abs() < 0.01 {
+                self.squash = 0.0;
+            }
+        }
 
         // Todo lo que está parado necesita algo bajo los pies.
         let mut floor = a.b - size();
@@ -416,11 +462,8 @@ impl Pet {
             }
         }
 
-        // Si le pasas el cursor encima se queda quieto y contento.
+        // Si le pasas el cursor encima se queda quieto y contento (con un ♥).
         if self.hover && matches!(self.mode, Mode::Walking | Mode::Idle) {
-            if self.mode == Mode::Walking && self.bubble.is_none() {
-                self.say("♥", 1.2);
-            }
             self.idle(0.8);
         }
 
@@ -465,7 +508,9 @@ impl Pet {
                     if self.hops > 0 {
                         self.hops -= 1;
                         self.vy = -520.0;
+                        self.squash = -0.12;
                     } else {
+                        self.squash = 0.15;
                         self.idle(2.0);
                     }
                 }
@@ -491,6 +536,8 @@ impl Pet {
     }
 
     fn land(&mut self) {
+        // Cuanto más rápido cae, más se aplasta.
+        self.squash = (self.vy.abs() / 1500.0 * 0.3).clamp(0.08, 0.3);
         self.vx = 0.0;
         self.vy = 0.0;
         match self.pending.take() {
@@ -543,6 +590,7 @@ impl Pet {
             if self.vy > 700.0 {
                 // Rebote si cae fuerte.
                 self.vy = -self.vy * 0.35;
+                self.squash = 0.3;
                 self.vx *= 0.7;
             } else {
                 self.land();
@@ -581,6 +629,7 @@ impl Pet {
         self.mode = Mode::Falling;
         self.perch = None;
         self.vy = vy;
+        self.squash = -0.15;
         self.vx = (tx - cx) / flight;
         if self.vx != 0.0 {
             self.dir = self.vx.signum();
@@ -793,5 +842,45 @@ mod tests {
         other.idle(5.0);
         other.knock(600.0, -300.0);
         assert_eq!(other.mode, Mode::Falling);
+    }
+
+    #[test]
+    fn landing_squashes_and_springs_back() {
+        let mut p = pet_at(500.0, 100.0);
+        let w = world(&[]);
+        let mut landed = false;
+        for _ in 0..300 {
+            p.update(1.0 / 60.0, &w);
+            if !landed && p.squash > 0.0 {
+                landed = true;
+                assert!(p.squash >= 0.08);
+            }
+        }
+        assert!(landed, "se aplastó al tocar el piso");
+        assert_eq!(p.squash, 0.0, "y volvió a su forma");
+    }
+
+    #[test]
+    fn emotes_follow_the_state() {
+        let mut p = pet_at(400.0, SCREEN.b - size());
+        p.idle(10.0);
+        assert_eq!(p.emote(), None);
+        p.hover = true;
+        assert_eq!(p.emote(), Some(Emote::Heart));
+        p.hover = false;
+        p.on_waiting();
+        assert_eq!(p.emote(), Some(Emote::Question));
+        p.on_attention("permiso");
+        assert_eq!(p.emote(), Some(Emote::Bang));
+
+        let mut busy = pet_at(400.0, SCREEN.b - size());
+        busy.idle(10.0);
+        busy.on_prompt();
+        assert_eq!(busy.mode, Mode::Walking);
+        assert_eq!(busy.emote(), None);
+        busy.busy_since = Some(Instant::now() - LONG_TASK - Duration::from_secs(1));
+        assert_eq!(busy.emote(), Some(Emote::Sweat));
+        busy.mode = Mode::Leaving;
+        assert_eq!(busy.emote(), None);
     }
 }

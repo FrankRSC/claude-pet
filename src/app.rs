@@ -887,6 +887,9 @@ impl App {
             let p = &pw.pet;
             if pw.press.is_some() || matches!(p.mode, Mode::Dragged | Mode::Falling) {
                 FAST
+            } else if p.squash.abs() > 0.02 {
+                // Recuperándose de un aterrizaje: un cuarto de segundo con más cuadros.
+                MOVING
             } else if matches!(p.mode, Mode::Idle | Mode::Sitting) {
                 STILL
             } else if p.mode == Mode::Sleeping {
