@@ -227,7 +227,8 @@ def main() -> int:
             continue
         rows, palette = pixelate(im, args.grid, args.colors)
         name = f"#{pid}" if args.no_names else spanish_name(pid)
-        skin = {"id": pid, "name": name, "rows": rows, "palette": palette}
+        # Los iconos de menú miran a la izquierda; la app los voltea al cargar.
+        skin = {"id": pid, "name": name, "facing": "left", "rows": rows, "palette": palette}
         eyes = [] if args.no_eyes else find_eyes(rows, palette)
         if eyes:
             skin["eyes"] = [list(p) for p in eyes]

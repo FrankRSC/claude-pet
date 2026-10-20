@@ -24,6 +24,9 @@
 //! centra y se alinea al suelo). Una fila con la mitad de caracteres se refleja.
 //! `eyes` son celdas (x, y) que se cierran al parpadear o dormir; también se
 //! acepta `"eye": "b"` para marcar como ojo todas las celdas de un carácter.
+//! `"facing": "left"` indica que el dibujo mira a la izquierda (los iconos de
+//! la Pokédex): se voltea al cargar, porque la app asume que todo mira a la
+//! derecha.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -177,6 +180,20 @@ fn parse_skin(v: &Value, grid: usize) -> Result<Skin, String> {
             eyes.push((ox + xy[0], oy + xy[1]));
         }
     }
+    // La app dibuja todo mirando a la derecha y lo voltea al caminar a la
+    // izquierda; los iconos de la Pokédex miran a la izquierda.
+    match v["facing"].as_str() {
+        None | Some("right") => {}
+        Some("left") => {
+            for row in &mut rows {
+                row.reverse();
+            }
+            for (x, _) in &mut eyes {
+                *x = GRID - 1 - *x;
+            }
+        }
+        Some(other) => return Err(format!("\"facing\" '{other}': debe ser \"left\" o \"right\"")),
+    }
     if let Some(ch) = v["eye"].as_str() {
         let &[k] = ch.as_bytes() else { return Err(format!("\"eye\" '{ch}': debe ser un solo carácter")) };
         for (y, row) in rows.iter().enumerate() {
@@ -254,6 +271,21 @@ mod tests {
         assert_eq!(&s.rows[oy + 3][ox..ox + 4], b"bbbb");
         assert_eq!(s.eyes, vec![(ox + 1, oy + 1)]);
         assert_eq!(skins[1].eyes, vec![(ox + 1, oy + 1), (ox + 2, oy + 1)]);
+    }
+
+    #[test]
+    fn left_facing_sprites_are_mirrored() {
+        let file = r#"{"grid": 4, "skins": [
+            {"name": "Izq", "facing": "left", "rows": ["....", "ak..", "aa..", "aaa."], "palette": {"a": [1, 2, 3], "k": [0, 0, 0]}, "eyes": [[1, 1]]},
+            {"name": "Mal", "facing": "up", "rows": ["....", "....", "....", "a..."], "palette": {"a": [1, 2, 3]}}
+        ]}"#;
+        let (skins, errors) = parse(file).unwrap();
+        assert_eq!(errors.len(), 1);
+        let (ox, oy) = ((GRID - 4) / 2, GRID - 4);
+        let s = &skins[0];
+        assert_eq!(&s.rows[oy + 1][ox..ox + 4], b"..ka");
+        assert_eq!(s.eyes, vec![(GRID - 1 - (ox + 1), oy + 1)]);
+        assert_eq!(s.rows[oy + 1][GRID - 1 - (ox + 1)], b'k', "el ojo sigue sobre su celda");
     }
 
     #[test]

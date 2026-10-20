@@ -136,6 +136,7 @@ El archivo lo genera `tools/pokedex.py` a partir de la Pokédex (ver abajo), per
 - `palette`: un color `[r, g, b]` por carácter.
 - `eyes` (opcional): celdas `[x, y]` que se cierran al parpadear y al dormir. También sirve `"eye": "k"` para marcar todas las celdas de un carácter.
 - `id` (opcional): número de Pokédex, solo para agrupar el menú.
+- `facing` (opcional): `"left"` si el dibujo mira a la izquierda, como los iconos de la Pokédex. La app lo voltea al cargar, porque asume que todo mira a la derecha y lo voltea al caminar hacia la izquierda.
 
 Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. Un avatar mal formado se omite (con `CLAUDE_PET_DEBUG=1` queda en el log) y no tumba la app. `cargo test` valida el `skins.json` instalado y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
 
