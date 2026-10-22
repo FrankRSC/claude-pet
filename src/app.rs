@@ -16,7 +16,8 @@ use crate::pet::{self, fmt_duration, hash, size, Mode, Pet, World};
 use crate::platform::{self, Surface};
 use crate::render::{off, Renderer, BUF};
 use crate::sprites::Look;
-use crate::{ipc, sprites, updater};
+use crate::sound::{self, Cue};
+use crate::{codex, installer, ipc, skins, sprites, updater};
 
 /// Cuadros por segundo según lo que hagan los monitos: solo lo que vuela o
 /// arrastras necesita 60; el sprite se anima a 4 por segundo.
@@ -66,18 +67,31 @@ struct PetWindow {
     /// y dónde: si no cambian, no se dibuja ni se toca la ventana.
     last_frame: u64,
     last_pos: (i32, i32),
+    /// Cuándo se apretó el último clic suelto, para reconocer el doble clic.
+    last_click: Option<Instant>,
+    /// Cuándo sonó por última vez pidiendo atención (Codex pide permiso seguido).
+    last_alert: Option<Instant>,
 }
 
 struct Tray {
-    _icon: TrayIcon,
+    icon: TrayIcon,
     demo: MenuId,
     hide: CheckMenuItem,
     notify: CheckMenuItem,
+    sounds: CheckMenuItem,
     /// [0] = "Aleatorio"; [i + 1] = avatar i.
     avatars: Vec<CheckMenuItem>,
+    /// [i] = avatar i entra en el aleatorio.
+    pool: Vec<CheckMenuItem>,
+    /// "Toda la generación N": la mete o saca completa del aleatorio.
+    pool_gens: Vec<(u32, CheckMenuItem)>,
+    pool_all: MenuId,
+    /// [0] = "Aleatorio"; [i + 1] = avatar i como ícono de la barra.
+    icons: Vec<CheckMenuItem>,
     /// Mismo orden que `SIZES`.
     sizes: Vec<CheckMenuItem>,
     update: MenuItem,
+    restart: MenuId,
     quit: MenuId,
 }
 
@@ -99,6 +113,7 @@ struct App {
     /// Si no se pudo crear, revisamos la carpeta cada pocos segundos.
     watcher: Option<notify::RecommendedWatcher>,
     last_scan: Instant,
+    last_codex_scan: Instant,
     /// Sesiones que ya tuvieron monito; el escaneo no las revive.
     scanned: std::collections::HashSet<String>,
     tray: Option<Tray>,
@@ -107,6 +122,10 @@ struct App {
     demo_count: u32,
     /// None = cada sesión recibe uno distinto.
     avatar_choice: Option<usize>,
+    /// Avatar que se dibuja en la bandeja; None = un Pokémon al azar al arrancar.
+    icon_choice: Option<usize>,
+    /// Avatares (por nombre) fuera del aleatorio.
+    excluded: std::collections::HashSet<String>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -114,14 +133,9 @@ fn config_path() -> Option<std::path::PathBuf> {
 }
 
 /// Tamaños del menú: (nombre, píxeles por celda).
-const SIZES: [(&str, u32); 6] = [
-    ("Chico", 3),
-    ("Mediano", 4),
-    ("Normal", 5),
-    ("Grande", 6),
-    ("Muy grande", 7),
-    ("Enorme", 8),
-];
+const SIZES: [(&str, u32); 4] = [("Chico", 2), ("Normal", 3), ("Grande", 4), ("Enorme", 5)];
+/// Con más avatares que esto, el menú Avatar se agrupa por generación.
+const GROUP_FROM: usize = 30;
 
 fn load_config() -> Value {
     config_path()
@@ -139,21 +153,38 @@ fn save_config(key: &str, value: Value) {
     let _ = std::fs::write(path, serde_json::to_string_pretty(&config).unwrap_or_default());
 }
 
-fn load_avatar_choice() -> Option<usize> {
-    let config = load_config();
-    let name = config["avatar"].as_str()?;
+fn find_avatar(name: &str) -> Option<usize> {
     (0..sprites::count()).find(|&i| sprites::name(i) == name)
 }
 
+fn load_avatar_choice() -> Option<usize> {
+    find_avatar(load_config()["avatar"].as_str()?)
+}
+
+fn load_icon_choice() -> Option<usize> {
+    find_avatar(load_config()["icon"].as_str()?)
+}
+
+fn load_excluded() -> std::collections::HashSet<String> {
+    load_config()["excluded"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn save_excluded(excluded: &std::collections::HashSet<String>) {
+    let mut names: Vec<&String> = excluded.iter().collect();
+    names.sort();
+    save_config("excluded", serde_json::json!(names));
+}
+
 fn save_avatar_choice(choice: Option<usize>) {
-    save_config("avatar", choice.map_or("aleatorio", sprites::name).into());
+    save_config("avatar", choice.map_or_else(|| "aleatorio".to_string(), sprites::name).into());
 }
 
 /// Avatar elegido a mano para cada proyecto (por nombre de carpeta).
 fn load_project_avatar(label: &str) -> Option<usize> {
-    let config = load_config();
-    let name = config["project_avatars"][label].as_str()?;
-    (0..sprites::count()).find(|&i| sprites::name(i) == name)
+    find_avatar(load_config()["project_avatars"][label].as_str()?)
 }
 
 fn save_project_avatar(label: &str, avatar: usize) {
@@ -166,7 +197,7 @@ fn save_project_avatar(label: &str, avatar: usize) {
 }
 
 fn load_cell_px() -> u32 {
-    load_config()["cell_px"].as_u64().map_or(5, |n| n as u32)
+    load_config()["cell_px"].as_u64().map_or(pet::DEFAULT_CELL, |n| n as u32)
 }
 
 /// `wait`: venimos de una actualización y la instancia anterior todavía está
@@ -202,6 +233,9 @@ pub fn run(demo: bool, wait: bool) {
         let _ = proxy.lock().unwrap().send_event(UserEvent::Menu(e));
     }));
     pet::set_cell_px(load_cell_px());
+    sound::set_enabled(load_config()["sounds"].as_bool().unwrap_or(true));
+    let n = skins::reload();
+    debug_log(format_args!("{n} avatares en skins.json"));
 
     let now = Instant::now();
     let mut app = App {
@@ -219,12 +253,15 @@ pub fn run(demo: bool, wait: bool) {
         proxy: event_loop.create_proxy(),
         watcher: watch_sessions(event_loop.create_proxy()),
         last_scan: now,
+        last_codex_scan: now,
         scanned: Default::default(),
         tray: None,
         hidden: false,
         demo_on_start: demo,
         demo_count: 0,
         avatar_choice: load_avatar_choice(),
+        icon_choice: load_icon_choice(),
+        excluded: load_excluded(),
     };
     let _ = event_loop.run_app(&mut app);
 }
@@ -290,9 +327,84 @@ fn check_available(proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-fn label_from_cwd(cwd: &str) -> String {
+/// Nombre de la carpeta del proyecto; sin carpeta, el nombre del agente.
+fn label_from_cwd(cwd: &str, agent: &str) -> String {
     let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
-    if name.is_empty() { "Claude".into() } else { name.into() }
+    if name.is_empty() { agent.into() } else { name.into() }
+}
+
+/// Arranca una instancia nueva (que espera a que esta suelte el puerto) y
+/// cierra esta. Al arrancar, la nueva vuelve a buscar las sesiones abiertas.
+fn restart(el: &ActiveEventLoop) {
+    debug_log(format_args!("reiniciando"));
+    if let Ok(exe) = std::env::current_exe() {
+        platform::spawn_detached(&exe, &["run", "--wait"]);
+    }
+    el.exit();
+}
+
+/// Los hooks de la TUI de Codex los corre el daemon `codex app-server`, que no
+/// muere al cerrar la sesión: el monito se ata al proceso de Codex que trabaja
+/// en esa carpeta. Si el hook ya viene de un cliente (`codex exec`), ese mismo.
+fn codex_pid(hook_pid: Option<u32>, cwd: &str) -> Option<u32> {
+    let clients = codex::clients();
+    if hook_pid.is_some_and(|p| clients.iter().any(|c| c.pid == p)) {
+        return hook_pid;
+    }
+    codex::client_in(&clients, cwd).or(hook_pid)
+}
+
+/// "codex" → "Codex". Un agente que no conocemos se muestra con mayúscula.
+fn agent_display(name: &str) -> String {
+    match installer::Agent::from_name(name) {
+        Some(a) => a.short().into(),
+        None => {
+            let mut c = name.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        }
+    }
+}
+
+/// Un ítem con palomita por avatar (índice = avatar) dentro de `menu`. Con
+/// pocos avatares van directo; con una Pokédex entera, en submenús por
+/// generación, que se devuelven por si hay que ponerles cabecera.
+fn avatar_items(menu: &Submenu, checked: impl Fn(usize) -> bool) -> (Vec<CheckMenuItem>, Vec<(u32, Submenu)>) {
+    let n = sprites::count();
+    let mut items = Vec::with_capacity(n);
+    let mut gens: Vec<(u32, Submenu)> = Vec::new();
+    for i in 0..n {
+        let item = CheckMenuItem::new(sprites::name(i), true, checked(i), None);
+        match sprites::generation(i).filter(|_| n > GROUP_FROM) {
+            None => {
+                let _ = menu.append(&item);
+            }
+            Some(g) => {
+                let k = match gens.iter().position(|(k, _)| *k == g) {
+                    Some(k) => k,
+                    None => {
+                        gens.push((g, Submenu::new(format!("Generación {g}"), true)));
+                        gens.len() - 1
+                    }
+                };
+                let _ = gens[k].1.append(&item);
+            }
+        }
+        items.push(item);
+    }
+    for (_, sub) in &gens {
+        let _ = menu.append(sub);
+    }
+    (items, gens)
+}
+
+/// Avatares de la generación `g`.
+fn in_generation(g: u32) -> Vec<usize> {
+    (0..sprites::count()).filter(|&i| sprites::generation(i) == Some(g)).collect()
+}
+
+fn tray_icon(index: usize) -> Option<Icon> {
+    let (rgba, w, h) = sprites::icon_rgba(index, pet::CLAUDE_ORANGE);
+    Icon::from_rgba(rgba, w, h).ok()
 }
 
 fn notify(summary: String, body: String) {
@@ -315,18 +427,44 @@ impl App {
         let demo = MenuItem::new("Monito de prueba", true, None);
         let hide = CheckMenuItem::new("Ocultar monitos", true, false, None);
         let notify = CheckMenuItem::new("Notificaciones", true, true, None);
+        let sounds = CheckMenuItem::new("Sonidos", true, load_config()["sounds"].as_bool().unwrap_or(true), None);
         let update = MenuItem::new(update_label(self.available.as_deref()), true, None);
+        let restart = MenuItem::new("Reiniciar Claude Pet", true, None);
         let quit = MenuItem::new("Salir", true, None);
+        // Avatar: uno fijo para todos, o aleatorio.
         let avatar_menu = Submenu::new("Avatar", true);
-        let mut avatars = vec![CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None)];
-        for i in 0..sprites::count() {
-            avatars.push(CheckMenuItem::new(sprites::name(i), true, self.avatar_choice == Some(i), None));
-        }
-        let _ = avatar_menu.append(&avatars[0]);
+        let random = CheckMenuItem::new("Aleatorio (uno por sesión)", true, self.avatar_choice.is_none(), None);
+        let _ = avatar_menu.append(&random);
         let _ = avatar_menu.append(&PredefinedMenuItem::separator());
-        for item in &avatars[1..] {
-            let _ = avatar_menu.append(item);
+        let choice = self.avatar_choice;
+        let (mut avatars, _) = avatar_items(&avatar_menu, |i| choice == Some(i));
+        avatars.insert(0, random);
+
+        // Grupo del aleatorio: qué avatares entran. Cada generación trae un
+        // ítem para meterla o sacarla completa.
+        let pool_menu = Submenu::new("Grupo del aleatorio", true);
+        let all = MenuItem::new("Todos", true, None);
+        let _ = pool_menu.append(&all);
+        let _ = pool_menu.append(&PredefinedMenuItem::separator());
+        let excluded = &self.excluded;
+        let (pool, gens) = avatar_items(&pool_menu, |i| !excluded.contains(&sprites::name(i)));
+        let mut pool_gens = Vec::new();
+        for (g, sub) in &gens {
+            let whole = in_generation(*g).into_iter().all(|i| pool[i].is_checked());
+            let item = CheckMenuItem::new(format!("Toda la generación {g}"), true, whole, None);
+            let _ = sub.prepend(&PredefinedMenuItem::separator());
+            let _ = sub.prepend(&item);
+            pool_gens.push((*g, item));
         }
+
+        let icon_menu = Submenu::new("Ícono de la barra", true);
+        let random_icon = CheckMenuItem::new("Aleatorio (uno al arrancar)", true, self.icon_choice.is_none(), None);
+        let _ = icon_menu.append(&random_icon);
+        let _ = icon_menu.append(&PredefinedMenuItem::separator());
+        let icon_choice = self.icon_choice;
+        let (mut icons, _) = avatar_items(&icon_menu, |i| icon_choice == Some(i));
+        icons.insert(0, random_icon);
+
         let size_menu = Submenu::new("Tamaño", true);
         let sizes: Vec<CheckMenuItem> = SIZES
             .iter()
@@ -338,28 +476,91 @@ impl App {
         let _ = menu.append_items(&[
             &demo,
             &avatar_menu,
+            &pool_menu,
+            &icon_menu,
             &size_menu,
             &hide,
             &notify,
+            &sounds,
             &PredefinedMenuItem::separator(),
             &update,
+            &restart,
             &quit,
         ]);
         let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Claude Pet");
-        if let Ok(icon) = Icon::from_rgba(sprites::icon_rgba(), 32, 32) {
+        let shown = self.icon_choice.unwrap_or_else(|| self.random_icon());
+        if let Some(icon) = tray_icon(shown) {
             builder = builder.with_icon(icon);
         }
         if let Ok(icon) = builder.build() {
             self.tray = Some(Tray {
-                _icon: icon,
+                icon,
                 demo: demo.id().clone(),
                 hide,
                 notify,
+                sounds,
                 avatars,
+                pool,
+                pool_gens,
+                pool_all: all.id().clone(),
+                icons,
                 sizes,
                 update,
+                restart: restart.id().clone(),
                 quit: quit.id().clone(),
             });
+        }
+    }
+
+    /// Un Pokémon al azar del grupo para la bandeja (el Monito solo si no hay otro).
+    fn random_icon(&self) -> usize {
+        let pool: Vec<usize> = self.pool().into_iter().filter(|&i| i != 0).collect();
+        if pool.is_empty() {
+            return 0;
+        }
+        let seed = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_nanos() as u64);
+        pool[(hash(&seed.to_string()) % pool.len() as u64) as usize]
+    }
+
+    /// None = uno al azar en cada arranque.
+    fn choose_icon(&mut self, choice: Option<usize>) {
+        self.icon_choice = choice;
+        save_config("icon", choice.map_or_else(|| "aleatorio".to_string(), sprites::name).into());
+        let shown = choice.unwrap_or_else(|| self.random_icon());
+        if let Some(tray) = &self.tray {
+            for (k, item) in tray.icons.iter().enumerate() {
+                item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
+            }
+            let _ = tray.icon.set_icon(tray_icon(shown));
+        }
+    }
+
+    /// Avatares que entran en el aleatorio: los no excluidos (si no queda
+    /// ninguno, todos).
+    fn pool(&self) -> Vec<usize> {
+        let pool: Vec<usize> = (0..sprites::count()).filter(|&i| !self.excluded.contains(&sprites::name(i))).collect();
+        if pool.is_empty() { (0..sprites::count()).collect() } else { pool }
+    }
+
+    /// Mete (`on`) o saca del aleatorio los avatares `which`, lo guarda y
+    /// actualiza las palomitas, incluidas las de "Toda la generación".
+    fn set_in_pool(&mut self, which: &[usize], on: bool) {
+        for &i in which {
+            let name = sprites::name(i);
+            if on {
+                self.excluded.remove(&name);
+            } else {
+                self.excluded.insert(name);
+            }
+        }
+        save_excluded(&self.excluded);
+        if let Some(tray) = &self.tray {
+            for &i in which {
+                tray.pool[i].set_checked(on);
+            }
+            for (g, item) in &tray.pool_gens {
+                item.set_checked(in_generation(*g).into_iter().all(|i| tray.pool[i].is_checked()));
+            }
         }
     }
 
@@ -380,8 +581,8 @@ impl App {
         }
     }
 
-    /// El avatar fijo elegido, o uno que dependa de la sesión y que no repita
-    /// ninguno de los monitos que ya están en pantalla (mientras alcancen).
+    /// El avatar fijo elegido, o uno del grupo que dependa de la sesión y que
+    /// no repita ninguno de los monitos que ya están en pantalla (mientras alcancen).
     fn pick_avatar(&self, session: &str, label: &str) -> usize {
         if let Some(i) = load_project_avatar(label) {
             return i;
@@ -389,12 +590,12 @@ impl App {
         if let Some(i) = self.avatar_choice {
             return i;
         }
-        let n = sprites::count();
-        let start = (hash(session) % n as u64) as usize;
-        (0..n)
-            .map(|k| (start + k) % n)
+        let pool = self.pool();
+        let start = (hash(session) % pool.len() as u64) as usize;
+        (0..pool.len())
+            .map(|k| pool[(start + k) % pool.len()])
             .find(|i| self.pets.iter().all(|pw| pw.avatar != *i))
-            .unwrap_or(start)
+            .unwrap_or(pool[start])
     }
 
     fn set_avatar(pw: &mut PetWindow, avatar: usize) {
@@ -402,10 +603,13 @@ impl App {
         pw.look = sprites::look(avatar, pw.pet.color);
     }
 
-    /// Clic central o ⌥+clic: el siguiente avatar, solo para este monito. Se
-    /// recuerda para su proyecto.
-    fn next_avatar(pw: &mut PetWindow) {
-        let next = (pw.avatar + 1) % sprites::count();
+    /// Clic central o ⌥+clic: el siguiente avatar del grupo, solo para este
+    /// monito. Se recuerda para su proyecto.
+    fn next_avatar(&mut self, idx: usize) {
+        let pool = self.pool();
+        let cur = pool.iter().position(|&i| i == self.pets[idx].avatar);
+        let next = pool[cur.map_or(0, |c| (c + 1) % pool.len())];
+        let pw = &mut self.pets[idx];
         Self::set_avatar(pw, next);
         pw.pet.say(sprites::name(next), 1.5);
         save_project_avatar(&pw.pet.label, next);
@@ -421,7 +625,11 @@ impl App {
                 item.set_checked(if k == 0 { choice.is_none() } else { choice == Some(k - 1) });
             }
         }
-        // Reasignamos a todos, uno por uno, para que en modo aleatorio no se repitan.
+        self.reassign_avatars();
+    }
+
+    /// Reparte avatares de nuevo, uno por uno, para que en modo aleatorio no se repitan.
+    fn reassign_avatars(&mut self) {
         let pets = std::mem::take(&mut self.pets);
         for mut pw in pets {
             let avatar = self.pick_avatar(&pw.pet.session, &pw.pet.label);
@@ -430,7 +638,30 @@ impl App {
         }
     }
 
-    fn spawn_pet(&mut self, el: &ActiveEventLoop, session: String, label: String, pid: Option<u32>) -> Option<usize> {
+    /// `claude-pet skins` reemplazó skins.json: recargar, rehacer el menú y
+    /// volver a repartir avatares (los índices pudieron cambiar).
+    fn reload_skins(&mut self) {
+        let n = skins::reload();
+        debug_log(format_args!("skins.json recargado: {n} avatares"));
+        self.avatar_choice = load_avatar_choice();
+        self.icon_choice = load_icon_choice();
+        sound::forget();
+        if self.tray.is_some() {
+            self.tray = None;
+            self.build_tray();
+        }
+        self.reassign_avatars();
+    }
+
+    fn spawn_pet(
+        &mut self,
+        el: &ActiveEventLoop,
+        session: String,
+        label: String,
+        agent: String,
+        cwd: &str,
+        pid: Option<u32>,
+    ) -> Option<usize> {
         let attrs = Window::default_attributes()
             .with_title("Claude Pet")
             .with_decorations(false)
@@ -445,7 +676,8 @@ impl App {
         let (cx, cy) = platform::cursor_pos();
         let area = area_at(&self.areas, cx, cy);
         let avatar = self.pick_avatar(&session, &label);
-        let pet = Pet::new(session, label, pid, area, self.pets.len());
+        let mut pet = Pet::new(session, label, agent, pid, area, self.pets.len());
+        pet.cwd = cwd.to_string();
         let look = sprites::look(avatar, pet.color);
         self.pets.push(PetWindow {
             pet,
@@ -458,6 +690,8 @@ impl App {
             shown: false,
             last_frame: 0,
             last_pos: (i32::MIN, i32::MIN),
+            last_click: None,
+            last_alert: None,
         });
         // Que el primer cuadro llegue ya y no simule el rato que el loop durmió.
         self.floors_at = Instant::now() - FLOORS_EVERY;
@@ -477,6 +711,36 @@ impl App {
                     "session_id": session,
                     "cwd": cwd,
                     "pet_pid": pid,
+                    "scan": true,
+                }),
+            );
+        }
+    }
+
+    /// Sesiones de Codex abiertas sin monito (por ejemplo, reanudadas sin
+    /// escribirles todavía). Solo mira el disco si hay un proceso de Codex sin monito.
+    fn scan_codex(&mut self, el: &ActiveEventLoop) {
+        let clients: Vec<_> = codex::clients()
+            .into_iter()
+            .filter(|c| !self.pets.iter().any(|pw| pw.pet.pid == Some(c.pid)))
+            .collect();
+        if clients.is_empty() {
+            return;
+        }
+        for s in codex::open_sessions(&clients) {
+            if self.scanned.contains(&s.id) || self.pets.iter().any(|pw| pw.pet.session == s.id) {
+                continue;
+            }
+            debug_log(format_args!("sesión de Codex abierta: {} en {} (pid {})", s.id, s.cwd, s.pid));
+            self.on_hook(
+                el,
+                serde_json::json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": s.id,
+                    "cwd": s.cwd,
+                    "pet_pid": s.pid,
+                    "agent": "codex",
+                    "scan": true,
                 }),
             );
         }
@@ -485,6 +749,8 @@ impl App {
     fn on_hook(&mut self, el: &ActiveEventLoop, v: Value) {
         match v["cmd"].as_str() {
             Some("quit") => return el.exit(),
+            Some("restart") => return restart(el),
+            Some("reload") => return self.reload_skins(),
             Some("size") => {
                 if let Some(px) = v["px"].as_u64() {
                     self.choose_size((px as u32).clamp(pet::MIN_CELL, pet::MAX_CELL));
@@ -496,43 +762,59 @@ impl App {
         let event = v["hook_event_name"].as_str().unwrap_or("");
         let Some(session) = v["session_id"].as_str().filter(|s| !s.is_empty()) else { return };
         let pid = v["pet_pid"].as_u64().map(|p| p as u32);
+        // Los hooks de versiones anteriores no mandan "agent": son de Claude Code.
+        let agent = agent_display(v["agent"].as_str().unwrap_or("claude"));
+        debug_log(format_args!("hook {agent} {event} {session} pid={pid:?}"));
 
-        let idx = match self.pets.iter().position(|p| p.pet.session == session) {
-            Some(i) => i,
+        let (idx, created) = match self.pets.iter().position(|p| p.pet.session == session) {
+            Some(i) => (i, false),
             None if event == "SessionEnd" => return,
             None => {
                 self.scanned.insert(session.to_string());
-                debug_log(format_args!("monito nuevo: {session} ({event})"));
-                let label = label_from_cwd(v["cwd"].as_str().unwrap_or(""));
-                match self.spawn_pet(el, session.to_string(), label, pid) {
-                    Some(i) => i,
+                let cwd = v["cwd"].as_str().unwrap_or("");
+                let pid = if v["agent"] == "codex" { codex_pid(pid, cwd) } else { pid };
+                debug_log(format_args!("monito nuevo: {session} ({agent}, {event}, pid={pid:?})"));
+                let label = label_from_cwd(cwd, &agent);
+                match self.spawn_pet(el, session.to_string(), label, agent, cwd, pid) {
+                    Some(i) => (i, true),
                     None => return,
                 }
             }
         };
         let notifications = self.notifications_on();
+        let mut cue = None;
         let pet = &mut self.pets[idx].pet;
-        if pid.is_some() {
+        // El primer PID manda: los hooks de Codex llegan con el del daemon,
+        // que no es el de la sesión.
+        if pet.pid.is_none() {
             pet.pid = pid;
         }
         match event {
             "UserPromptSubmit" => pet.on_prompt(),
+            "SubagentStart" => {
+                pet.add_kit(v["agent_id"].as_str(), v["agent_type"].as_str().unwrap_or(""));
+                cue = Some(Cue::Kit);
+            }
+            "SubagentStop" => pet.remove_kit(v["agent_id"].as_str()),
             "Stop" => {
                 let took = pet.on_stop();
+                cue = Some(Cue::Done);
                 if notifications {
                     let body = match took {
                         Some(d) => format!("{} terminó en {}", pet.label, fmt_duration(d)),
                         None => format!("{} terminó", pet.label),
                     };
-                    notify("✅ Claude terminó".into(), body);
+                    notify(format!("✅ {} terminó", pet.agent), body);
                 }
             }
             "Notification" => {
-                let msg = v["message"].as_str().unwrap_or("Claude necesita tu atención");
+                let fallback = format!("{} necesita tu atención", pet.agent);
+                let msg = v["message"].as_str().unwrap_or(&fallback);
                 if msg.to_lowercase().contains("waiting for your input") {
                     pet.on_waiting();
                 } else {
                     pet.on_attention(msg);
+                    cue = Some(Cue::Attention);
                     if notifications {
                         notify(format!("🔔 {}", pet.label), msg.to_string());
                     }
@@ -540,6 +822,37 @@ impl App {
             }
             "SessionEnd" => pet.on_end(),
             _ => {}
+        }
+        if event == "Stop" {
+            self.cheer_around(idx);
+        }
+        // Una sesión nueva saluda con su grito, salvo que ya traiga el suyo.
+        if created && cue.is_none() && event != "SubagentStop" {
+            cue = Some(Cue::Appear);
+        }
+        // Los escaneos (arranque, reinicio, sesiones ya abiertas) no suenan.
+        if v["scan"].as_bool() == Some(true) {
+            return;
+        }
+        let pw = &mut self.pets[idx];
+        if cue == Some(Cue::Attention) {
+            if pw.last_alert.is_some_and(|t| t.elapsed() < Duration::from_secs(20)) {
+                return;
+            }
+            pw.last_alert = Some(Instant::now());
+        }
+        if let Some(cue) = cue {
+            sound::play(pw.avatar, cue);
+        }
+    }
+
+    /// Festejo contagioso: los vecinos libres de un monito que terminó saltan con él.
+    fn cheer_around(&mut self, idx: usize) {
+        let (x, y) = (self.pets[idx].pet.x, self.pets[idx].pet.y);
+        for (k, pw) in self.pets.iter_mut().enumerate() {
+            if k != idx && (pw.pet.x - x).abs() < 500.0 && (pw.pet.y - y).abs() < 300.0 {
+                pw.pet.cheer();
+            }
         }
     }
 
@@ -581,8 +894,22 @@ impl App {
             let Some(tray) = &self.tray else { return };
             if let Some(k) = tray.avatars.iter().position(|item| *item.id() == ev.id) {
                 self.choose_avatar(k.checked_sub(1));
+            } else if let Some(k) = tray.icons.iter().position(|item| *item.id() == ev.id) {
+                self.choose_icon(k.checked_sub(1));
+            } else if let Some(k) = tray.pool.iter().position(|item| *item.id() == ev.id) {
+                // El ítem ya cambió de estado solo; lo leemos.
+                let on = tray.pool[k].is_checked();
+                self.set_in_pool(&[k], on);
+            } else if let Some(k) = tray.pool_gens.iter().position(|(_, item)| *item.id() == ev.id) {
+                let (g, on) = (tray.pool_gens[k].0, tray.pool_gens[k].1.is_checked());
+                self.set_in_pool(&in_generation(g), on);
+            } else if ev.id == tray.pool_all {
+                let all: Vec<usize> = (0..sprites::count()).collect();
+                self.set_in_pool(&all, true);
             } else if let Some(k) = tray.sizes.iter().position(|item| *item.id() == ev.id) {
                 self.choose_size(SIZES[k].1);
+            } else if ev.id == tray.restart {
+                restart(el);
             } else if ev.id == tray.quit {
                 el.exit();
             } else if ev.id == *tray.update.id() {
@@ -596,6 +923,10 @@ impl App {
                 self.demo_count += 1;
                 let v = demo_event(self.demo_count);
                 self.on_hook(el, v);
+            } else if ev.id == *tray.sounds.id() {
+                let on = tray.sounds.is_checked();
+                sound::set_enabled(on);
+                save_config("sounds", on.into());
             } else if ev.id == *tray.hide.id() {
                 self.hidden = tray.hide.is_checked();
                 for pw in &mut self.pets {
@@ -616,6 +947,9 @@ impl App {
             let p = &pw.pet;
             if pw.press.is_some() || matches!(p.mode, Mode::Dragged | Mode::Falling) {
                 FAST
+            } else if p.squash.abs() > 0.02 {
+                // Recuperándose de un aterrizaje: un cuarto de segundo con más cuadros.
+                MOVING
             } else if matches!(p.mode, Mode::Idle | Mode::Sitting) {
                 STILL
             } else if p.mode == Mode::Sleeping {
@@ -650,6 +984,11 @@ impl App {
         if self.watcher.is_none() && now - self.last_scan > Duration::from_secs(3) {
             self.last_scan = now;
             self.scan_sessions(el);
+        }
+
+        if now - self.last_codex_scan > Duration::from_secs(15) {
+            self.last_codex_scan = now;
+            self.scan_codex(el);
         }
 
         if now - self.last_update_check > Duration::from_secs(6 * 60 * 60) {
@@ -698,6 +1037,26 @@ impl App {
                 pw.pet.update(step, &world);
             }
         }
+        // Se saludan al cruzarse (cada par una vez; antes de que se esquiven).
+        for j in 1..self.pets.len() {
+            let (left, right) = self.pets.split_at_mut(j);
+            for a in left.iter_mut() {
+                pet::meet(&mut a.pet, &mut right[0].pet);
+            }
+        }
+        // Los que no hacen nada voltean a ver al que te está llamando.
+        let calls: Vec<f32> = self.pets.iter().filter(|pw| pw.pet.mode == Mode::Attention).map(|pw| pw.pet.x).collect();
+        if !calls.is_empty() {
+            for pw in &mut self.pets {
+                if matches!(pw.pet.mode, Mode::Idle | Mode::Sitting) && !pw.pet.hover {
+                    let x = pw.pet.x;
+                    let nearest = calls.iter().copied().min_by(|p, q| (p - x).abs().total_cmp(&(q - x).abs()));
+                    if let Some(target) = nearest.filter(|t| (t - x).abs() > 1.0) {
+                        pw.pet.face(target);
+                    }
+                }
+            }
+        }
         for i in 0..self.pets.len() {
             for j in 0..self.pets.len() {
                 if i == j {
@@ -744,7 +1103,7 @@ impl App {
 }
 
 /// Con CLAUDE_PET_DEBUG=1 escribe en %TEMP%\claude-pet.log.
-fn debug_log(msg: std::fmt::Arguments) {
+pub fn debug_log(msg: std::fmt::Arguments) {
     if std::env::var_os("CLAUDE_PET_DEBUG").is_none() {
         return;
     }
@@ -758,7 +1117,17 @@ fn debug_log(msg: std::fmt::Arguments) {
     }
 }
 
-/// Clic corto = globo con info; mantener o mover = arrastrar; soltar = lanzar.
+/// Trae al frente la terminal o el editor de la sesión del monito.
+fn go_to_session(pet: &mut Pet) {
+    let target = pet.pid.and_then(|pid| platform::focus_session(pid, &pet.cwd));
+    debug_log(format_args!("ir a la sesión {} (pid {:?}): {target:?}", pet.session, pet.pid));
+    if target.is_none() {
+        pet.say("No encontré su ventana", 2.5);
+    }
+}
+
+/// Clic corto = globo con info; doble clic = ir a la sesión; mantener o
+/// mover = arrastrar; soltar = lanzar.
 fn drag(pw: &mut PetWindow, cursor: (f32, f32), down: bool, now: Instant) {
     let Some(p) = &mut pw.press else { return };
     debug_log(format_args!(
@@ -786,7 +1155,17 @@ fn drag(pw: &mut PetWindow, cursor: (f32, f32), down: bool, now: Instant) {
         if p.dragging {
             pw.pet.throw(p.vel.0, p.vel.1);
         } else {
-            pw.pet.on_click();
+            // Doble clic, o un clic si te está llamando: a su sesión. Se mide
+            // entre los momentos en que se apretó, que llegan sin retraso.
+            let pressed = p.at;
+            let double = pw.last_click.is_some_and(|t| pressed - t < Duration::from_millis(450));
+            if double || pw.pet.mode == Mode::Attention {
+                pw.last_click = None;
+                go_to_session(&mut pw.pet);
+            } else {
+                pw.pet.on_click();
+                pw.last_click = Some(pressed);
+            }
         }
         pw.press = None;
     }
@@ -803,6 +1182,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_hook(el, demo_event(0));
         }
         self.scan_sessions(el);
+        self.scan_codex(el);
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
@@ -820,10 +1200,12 @@ impl ApplicationHandler<UserEvent> for App {
             debug_log(format_args!("{id:?} {event:?}"));
         }
         let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = event else { return };
-        let Some(pw) = self.pets.iter_mut().find(|pw| pw.window.id() == id) else { return };
+        let Some(idx) = self.pets.iter().position(|pw| pw.window.id() == id) else { return };
+        if button == MouseButton::Middle || (button == MouseButton::Left && platform::alt_down()) {
+            return self.next_avatar(idx);
+        }
+        let pw = &mut self.pets[idx];
         match button {
-            MouseButton::Middle => Self::next_avatar(pw),
-            MouseButton::Left if platform::alt_down() => Self::next_avatar(pw),
             MouseButton::Left => {
                 let c = platform::cursor_pos();
                 let now = Instant::now();

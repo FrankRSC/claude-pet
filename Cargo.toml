@@ -12,6 +12,8 @@ notify-rust = "4"
 tray-icon = "0.21"
 dirs = "6"
 notify = "8.2.0"
+# Decodifica los gritos (Ogg Vorbis); Rust puro, sin dependencias del sistema.
+lewton = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -24,6 +26,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_Registry",
     "Win32_Graphics_Dwm",
+    "Win32_Media",
+    "Win32_Media_Audio",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

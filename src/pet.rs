@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::geom::{area_at, in_any, Floor, Rect};
 
-/// Píxeles por celda del sprite de 16×16 (ajustable desde la bandeja).
-static CELL_PX: AtomicU32 = AtomicU32::new(5);
-pub const MIN_CELL: u32 = 3;
-pub const MAX_CELL: u32 = 8;
+/// Píxeles por celda del sprite de GRID×GRID (ajustable desde la bandeja).
+static CELL_PX: AtomicU32 = AtomicU32::new(DEFAULT_CELL);
+pub const MIN_CELL: u32 = 2;
+pub const DEFAULT_CELL: u32 = 3;
+pub const MAX_CELL: u32 = 5;
 
 pub fn cell_px() -> u32 {
     CELL_PX.load(Ordering::Relaxed)
@@ -80,6 +81,10 @@ pub enum Mode {
 pub struct Pet {
     pub session: String,
     pub label: String,
+    /// Carpeta de la sesión (para ir a ella con doble clic).
+    pub cwd: String,
+    /// Quién manda los eventos: "Claude", "Codex", "Gemini", "OpenCode"…
+    pub agent: String,
     pub color: [u8; 3],
     pub pid: Option<u32>,
     pub x: f32,
@@ -109,12 +114,79 @@ pub struct Pet {
     /// Segundos que le quedan persiguiendo al cursor.
     chase: f32,
     rng: u64,
+    /// Aplastado (+) o estirado (−) al aterrizar y al saltar; vuelve solo a 0.
+    pub squash: f32,
+    /// Segundos que le quedan mostrando "?" (el agente espera tu respuesta).
+    waiting: f32,
+    /// Segundos que le quedan mostrando ♥ (lo acaban de saludar).
+    love: f32,
+    /// Segundos antes de poder volver a saludar.
+    greet_cd: f32,
+    /// Subagentes en curso: crías que lo siguen.
+    pub kits: Vec<Kit>,
 }
+
+/// Un subagente del agente de este monito.
+#[derive(Clone, Debug)]
+pub struct Kit {
+    pub id: String,
+    pub kind: String,
+    born: Instant,
+}
+
+/// Más crías que esto no se dibujan: se resumen con "+N".
+pub const KITS_SHOWN: usize = 4;
+/// Una cría de la que nunca llegó el SubagentStop se descarta.
+const KIT_MAX_AGE: Duration = Duration::from_secs(3600);
+
+/// Iconito sobre la cabeza que dice cómo está, sin texto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Emote {
+    /// Necesita tu atención.
+    Bang,
+    /// Espera tu respuesta.
+    Question,
+    /// Le pasas el cursor encima.
+    Heart,
+    /// Está festejando.
+    Note,
+    /// Lleva mucho trabajando.
+    Sweat,
+}
+
+/// Desde cuándo una tarea larga le saca una gota de sudor.
+const LONG_TASK: Duration = Duration::from_secs(180);
 
 pub fn hash(s: &str) -> u64 {
     // FNV-1a: estable entre ejecuciones, así cada sesión conserva su color.
     s.bytes()
         .fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Dos monitos que se cruzan en el suelo se saludan: se miran, uno dice hola
+/// y al otro le sale un ♥. Cada uno espera un rato antes de volver a saludar.
+/// Devuelve si se saludaron.
+pub fn meet(a: &mut Pet, b: &mut Pet) -> bool {
+    let free = |p: &Pet| {
+        matches!(p.mode, Mode::Walking | Mode::Idle) && p.greet_cd <= 0.0 && p.chase <= 0.0 && p.bubble.is_none()
+    };
+    let close = (a.y - b.y).abs() < 2.0 && (a.x - b.x).abs() < size() * 0.9;
+    let toward = |p: &Pet, x: f32| p.mode == Mode::Walking && (x - p.x) * p.dir > 0.0;
+    if !(close && free(a) && free(b) && (toward(a, b.x) || toward(b, a.x))) {
+        return false;
+    }
+    const HELLO: [&str; 4] = ["¡Hola!", "¡Hey!", "¡Qué tal!", "¡Buenas!"];
+    let (ax, bx) = (a.x, b.x);
+    a.face(bx);
+    b.face(ax);
+    a.idle(1.8);
+    b.idle(1.8);
+    let k = (a.rand() * HELLO.len() as f32) as usize % HELLO.len();
+    a.say(HELLO[k], 1.6);
+    b.love = 1.6;
+    a.greet_cd = 90.0;
+    b.greet_cd = 90.0;
+    true
 }
 
 pub fn fmt_duration(d: Duration) -> String {
@@ -127,12 +199,14 @@ pub fn fmt_duration(d: Duration) -> String {
 }
 
 impl Pet {
-    pub fn new(session: String, label: String, pid: Option<u32>, area: Rect, index: usize) -> Pet {
+    pub fn new(session: String, label: String, agent: String, pid: Option<u32>, area: Rect, index: usize) -> Pet {
         let h = hash(&session);
         // El primer monito es naranja Claude; los demás toman color por sesión.
         let color = if index == 0 { CLAUDE_ORANGE } else { PALETTE[(h % PALETTE.len() as u64) as usize] };
         let mut pet = Pet {
             session,
+            cwd: String::new(),
+            agent,
             color,
             pid,
             x: 0.0,
@@ -155,6 +229,11 @@ impl Pet {
             hover: false,
             chase: 0.0,
             rng: h | 1,
+            squash: 0.0,
+            waiting: 0.0,
+            love: 0.0,
+            greet_cd: 20.0,
+            kits: Vec::new(),
         };
         pet.x = area.l + pet.rand() * (area.r - area.l - size()).max(0.0);
         pet.dir = if pet.rand() < 0.5 { -1.0 } else { 1.0 };
@@ -264,10 +343,37 @@ impl Pet {
     }
 
     pub fn on_waiting(&mut self) {
-        self.say("te espero…", 5.0);
+        self.say("te espero…", 3.0);
+        self.waiting = 10.0;
+    }
+
+    /// Nace una cría (SubagentStart). Sin id, se inventa uno; repetido, se ignora.
+    pub fn add_kit(&mut self, id: Option<&str>, kind: &str) {
+        let id = id.map_or_else(|| format!("sin-id-{}", self.kits.len()), str::to_string);
+        if self.kits.iter().any(|k| k.id == id) {
+            return;
+        }
+        let kind = if kind.trim().is_empty() { "subagente" } else { kind.trim() };
+        self.kits.push(Kit { id, kind: kind.to_string(), born: Instant::now() });
+        self.say(format!("+ {kind}"), 1.5);
+    }
+
+    /// Se va una cría (SubagentStop): la de ese id, o la más vieja si no hay id.
+    pub fn remove_kit(&mut self, id: Option<&str>) {
+        let pos = match id {
+            Some(id) => self.kits.iter().position(|k| k.id == id),
+            None => (!self.kits.is_empty()).then_some(0),
+        };
+        if let Some(i) = pos {
+            let kit = self.kits.remove(i);
+            if self.bubble.is_none() {
+                self.say(format!("✓ {}", kit.kind), 1.2);
+            }
+        }
     }
 
     pub fn on_end(&mut self) {
+        self.kits.clear();
         if self.mode != Mode::Leaving {
             self.say("¡Adiós!", 2.0);
             self.mode = Mode::Leaving;
@@ -286,8 +392,26 @@ impl Pet {
         }
     }
 
+    /// El iconito que le toca según lo que está haciendo.
+    pub fn emote(&self) -> Option<Emote> {
+        match self.mode {
+            Mode::Leaving | Mode::Dragged | Mode::Falling => None,
+            Mode::Attention => Some(Emote::Bang),
+            Mode::Celebrating => Some(Emote::Note),
+            Mode::Idle | Mode::Walking | Mode::Sitting if self.hover || self.love > 0.0 => Some(Emote::Heart),
+            _ if self.waiting > 0.0 => Some(Emote::Question),
+            _ if self.busy_since.is_some_and(|t| t.elapsed() > LONG_TASK) => Some(Emote::Sweat),
+            _ => None,
+        }
+    }
+
     pub fn on_click(&mut self) {
-        let text = format!("{} · {}", self.label, self.status());
+        let mut text = format!("{} · {} · {}", self.label, self.agent, self.status());
+        match self.kits.len() {
+            0 => {}
+            1 => text.push_str(" · 1 cría"),
+            n => text.push_str(&format!(" · {n} crías")),
+        }
         self.say(text, 4.0);
         if self.mode == Mode::Sleeping {
             self.idle(1.0);
@@ -343,6 +467,7 @@ impl Pet {
         self.perch = None;
         self.vx = vx;
         self.vy = vy;
+        self.squash = -0.12;
         self.say("¡Ay!", 1.2);
     }
 
@@ -361,6 +486,24 @@ impl Pet {
             && (other_x - self.x).abs() < size() * 0.6
         {
             self.dir = -self.dir;
+        }
+    }
+
+    /// Mira hacia `x` (sin moverse).
+    pub fn face(&mut self, x: f32) {
+        let dir = if x > self.x { 1.0 } else { -1.0 };
+        if self.dir != dir {
+            self.dir = dir;
+        }
+    }
+
+    /// Otro monito terminó cerca: un saltito de festejo si está libre y despierto.
+    pub fn cheer(&mut self) {
+        if matches!(self.mode, Mode::Idle | Mode::Walking | Mode::Sitting) && !self.busy() && !self.perched() {
+            self.mode = Mode::Celebrating;
+            self.hops = 0;
+            self.vy = -420.0;
+            self.squash = -0.12;
         }
     }
 
@@ -396,6 +539,18 @@ impl Pet {
         let a = area_at(w.areas, self.x + size() / 2.0, self.y + size() / 2.0);
         self.timer -= dt;
         self.chase -= dt;
+        self.waiting = (self.waiting - dt).max(0.0);
+        self.love = (self.love - dt).max(0.0);
+        self.greet_cd -= dt;
+        if !self.kits.is_empty() {
+            self.kits.retain(|k| k.born.elapsed() < KIT_MAX_AGE);
+        }
+        if self.squash != 0.0 {
+            self.squash *= (-12.0 * dt).exp();
+            if self.squash.abs() < 0.01 {
+                self.squash = 0.0;
+            }
+        }
 
         // Todo lo que está parado necesita algo bajo los pies.
         let mut floor = a.b - size();
@@ -412,11 +567,8 @@ impl Pet {
             }
         }
 
-        // Si le pasas el cursor encima se queda quieto y contento.
+        // Si le pasas el cursor encima se queda quieto y contento (con un ♥).
         if self.hover && matches!(self.mode, Mode::Walking | Mode::Idle) {
-            if self.mode == Mode::Walking && self.bubble.is_none() {
-                self.say("♥", 1.2);
-            }
             self.idle(0.8);
         }
 
@@ -461,7 +613,9 @@ impl Pet {
                     if self.hops > 0 {
                         self.hops -= 1;
                         self.vy = -520.0;
+                        self.squash = -0.12;
                     } else {
+                        self.squash = 0.15;
                         self.idle(2.0);
                     }
                 }
@@ -487,6 +641,8 @@ impl Pet {
     }
 
     fn land(&mut self) {
+        // Cuanto más rápido cae, más se aplasta.
+        self.squash = (self.vy.abs() / 1500.0 * 0.3).clamp(0.08, 0.3);
         self.vx = 0.0;
         self.vy = 0.0;
         match self.pending.take() {
@@ -539,6 +695,7 @@ impl Pet {
             if self.vy > 700.0 {
                 // Rebote si cae fuerte.
                 self.vy = -self.vy * 0.35;
+                self.squash = 0.3;
                 self.vx *= 0.7;
             } else {
                 self.land();
@@ -577,6 +734,7 @@ impl Pet {
         self.mode = Mode::Falling;
         self.perch = None;
         self.vy = vy;
+        self.squash = -0.15;
         self.vx = (tx - cx) / flight;
         if self.vx != 0.0 {
             self.dir = self.vx.signum();
@@ -734,7 +892,7 @@ mod tests {
     }
 
     fn pet_at(x: f32, y: f32) -> Pet {
-        let mut p = Pet::new("t".into(), "t".into(), None, SCREEN, 0);
+        let mut p = Pet::new("t".into(), "t".into(), "Claude".into(), None, SCREEN, 0);
         p.bubble = None;
         p.x = x;
         p.y = y;
@@ -789,5 +947,100 @@ mod tests {
         other.idle(5.0);
         other.knock(600.0, -300.0);
         assert_eq!(other.mode, Mode::Falling);
+    }
+
+    #[test]
+    fn walking_into_each_other_they_say_hello_once() {
+        let ground = SCREEN.b - size();
+        let mut a = pet_at(400.0, ground);
+        let mut b = pet_at(400.0 + size() * 0.8, ground);
+        for p in [&mut a, &mut b] {
+            p.start_walking();
+            p.greet_cd = 0.0;
+        }
+        a.dir = 1.0;
+        b.dir = 1.0;
+        assert!(meet(&mut a, &mut b), "a camina hacia b");
+        assert_eq!((a.mode, b.mode), (Mode::Idle, Mode::Idle));
+        assert!(a.bubble.is_some());
+        assert_eq!(b.emote(), Some(Emote::Heart));
+        assert!(b.facing_left(), "b se voltea hacia a");
+        a.bubble = None;
+        a.start_walking();
+        assert!(!meet(&mut a, &mut b), "no vuelven a saludarse enseguida");
+    }
+
+    #[test]
+    fn neighbours_cheer_unless_busy() {
+        let ground = SCREEN.b - size();
+        let mut idle = pet_at(400.0, ground);
+        idle.idle(5.0);
+        idle.cheer();
+        assert_eq!(idle.mode, Mode::Celebrating);
+        run(&mut idle, &world(&[]), 2.0);
+        assert_eq!(idle.y, ground, "aterriza en el mismo piso");
+
+        let mut busy = pet_at(400.0, ground);
+        busy.idle(5.0);
+        busy.on_prompt();
+        busy.cheer();
+        assert_eq!(busy.mode, Mode::Walking);
+    }
+
+    #[test]
+    fn kits_come_and_go_by_id() {
+        let mut p = pet_at(400.0, SCREEN.b - size());
+        p.add_kit(Some("a"), "Explore");
+        p.add_kit(Some("a"), "Explore");
+        p.add_kit(Some("b"), " ");
+        p.add_kit(None, "Plan");
+        assert_eq!(p.kits.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>(), ["Explore", "subagente", "Plan"]);
+        p.remove_kit(Some("b"));
+        p.remove_kit(Some("no-existe"));
+        assert_eq!(p.kits.len(), 2);
+        p.remove_kit(None);
+        assert_eq!(p.kits[0].kind, "Plan", "sin id se va la más vieja");
+        p.on_end();
+        assert!(p.kits.is_empty(), "al cerrar la sesión no quedan crías");
+    }
+
+    #[test]
+    fn landing_squashes_and_springs_back() {
+        let mut p = pet_at(500.0, 100.0);
+        let w = world(&[]);
+        let mut landed = false;
+        for _ in 0..300 {
+            p.update(1.0 / 60.0, &w);
+            if !landed && p.squash > 0.0 {
+                landed = true;
+                assert!(p.squash >= 0.08);
+            }
+        }
+        assert!(landed, "se aplastó al tocar el piso");
+        assert_eq!(p.squash, 0.0, "y volvió a su forma");
+    }
+
+    #[test]
+    fn emotes_follow_the_state() {
+        let mut p = pet_at(400.0, SCREEN.b - size());
+        p.idle(10.0);
+        assert_eq!(p.emote(), None);
+        p.hover = true;
+        assert_eq!(p.emote(), Some(Emote::Heart));
+        p.hover = false;
+        p.on_waiting();
+        assert_eq!(p.emote(), Some(Emote::Question));
+        p.on_attention("permiso");
+        assert_eq!(p.emote(), Some(Emote::Bang));
+
+        let mut busy = pet_at(400.0, SCREEN.b - size());
+        busy.idle(10.0);
+        busy.on_prompt();
+        assert_eq!(busy.mode, Mode::Walking);
+        assert_eq!(busy.emote(), None);
+        busy.busy_since = Some(Instant::now() - LONG_TASK - Duration::from_secs(1));
+        assert_eq!(busy.emote(), Some(Emote::Sweat));
+        busy.mode = Mode::Leaving;
+        assert_eq!(busy.emote(), None);
     }
 }

@@ -1,1 +1,6 @@
 target/
+
+# Generados por tools/pokedex.py (sprites con copyright, no se suben)
+tools/.cache/
+skins.json
+*.preview.png

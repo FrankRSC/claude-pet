@@ -262,9 +262,103 @@ fn process_table() -> HashMap<u32, (u32, String)> {
     map
 }
 
-pub fn find_claude_pid() -> Option<u32> {
+pub fn find_agent_pid(names: &[&str]) -> Option<u32> {
     let table = process_table();
-    super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned())
+    super::find_ancestor(std::process::id(), |pid| table.get(&pid).cloned(), names)
+}
+
+/// Procesos `name.exe`. Windows no da argv ni carpeta sin leer la memoria del
+/// proceso, así que van vacíos (y el descubrimiento de sesiones no aplica).
+pub fn processes_named(name: &str) -> Vec<super::ProcInfo> {
+    process_table()
+        .into_iter()
+        .filter(|(_, (_, exe))| exe.to_lowercase().trim_end_matches(".exe") == name)
+        .map(|(pid, _)| super::ProcInfo { pid, args: Vec::new(), cwd: None, started: 0 })
+        .collect()
+}
+
+unsafe extern "system" fn first_window_of(hwnd: HWND, data: LPARAM) -> BOOL {
+    let (pid, found) = &mut *(data as *mut (u32, HWND));
+    let mut owner = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut owner);
+    if owner == *pid && IsWindowVisible(hwnd) != 0 && GetWindowTextLengthW(hwnd) > 0 {
+        *found = hwnd;
+        return 0;
+    }
+    1
+}
+
+fn window_of(pid: u32) -> Option<HWND> {
+    let mut data: (u32, HWND) = (pid, null_mut());
+    unsafe { EnumWindows(Some(first_window_of), &mut data as *mut _ as LPARAM) };
+    (!data.1.is_null()).then_some(data.1)
+}
+
+/// Trae al frente la ventana de la sesión del proceso `pid`: sube por sus
+/// padres (y la consola `conhost`/`OpenConsole` de cada uno) hasta uno con
+/// ventana visible, sin llegar al Explorador. Devuelve el ejecutable de esa
+/// ventana, o None si no hay. A mejor esfuerzo: Windows no deja elegir la
+/// pestaña de Windows Terminal desde fuera.
+pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
+    let table = process_table();
+    let mut p = pid;
+    for _ in 0..24 {
+        let (ppid, name) = table.get(&p)?.clone();
+        if name.eq_ignore_ascii_case("explorer.exe") {
+            return None;
+        }
+        let consoles = table
+            .iter()
+            .filter(|(_, (parent, n))| *parent == p && (n.eq_ignore_ascii_case("conhost.exe") || n.eq_ignore_ascii_case("OpenConsole.exe")))
+            .map(|(c, _)| *c);
+        for candidate in std::iter::once(p).chain(consoles) {
+            if let Some(hwnd) = window_of(candidate) {
+                unsafe {
+                    if IsIconic(hwnd) != 0 {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    SetForegroundWindow(hwnd);
+                }
+                return Some(table.get(&candidate).map_or(name, |(_, n)| n.clone()));
+            }
+        }
+        if ppid == 0 || ppid == p {
+            return None;
+        }
+        p = ppid;
+    }
+    None
+}
+
+/// El WAV que está tocando: PlaySound lee de esta memoria mientras suena.
+static PLAYING: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// Toca un WAV en memoria sin bloquear (corta el anterior). Devuelve si empezó.
+pub fn play_wav(wav: Vec<u8>) -> bool {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+    let mut current = PLAYING.lock().unwrap();
+    unsafe {
+        // Primero se corta el anterior: si no, su memoria se liberaría sonando.
+        PlaySoundW(null(), null_mut(), 0);
+        *current = wav;
+        PlaySoundW(current.as_ptr() as *const u16, null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) != 0
+    }
+}
+
+/// Toca un sonido del sistema (los del Panel de control > Sonido).
+pub fn play_system(sound: super::SystemSound) {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+    let alias = wide(match sound {
+        super::SystemSound::Pop => "SystemNotification",
+        super::SystemSound::Done => "SystemAsterisk",
+        super::SystemSound::Alert => "SystemExclamation",
+    });
+    let mut current = PLAYING.lock().unwrap();
+    unsafe {
+        PlaySoundW(null(), null_mut(), 0);
+        current.clear();
+        PlaySoundW(alias.as_ptr(), null_mut(), SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
 }
 
 pub fn spawn_detached(exe: &Path, args: &[&str]) {
