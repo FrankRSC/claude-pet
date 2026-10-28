@@ -214,6 +214,7 @@ pub fn run(demo: bool, wait: bool) {
         listener = ipc::bind();
     }
     updater::cleanup();
+    installer::refresh_hooks();
     let Some(listener) = listener else {
         // Ya hay una instancia; si pidieron demo, se la mandamos a ella.
         if demo {
