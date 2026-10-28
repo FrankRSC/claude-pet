@@ -189,16 +189,9 @@ El actualizador instala el binario del último release sin verificar firmas: con
 
 ## Publicar una versión
 
-Los releases los publica el CI cuando subes un tag `v*`. Para sacar la versión `0.2.0`:
+Los releases los publica el CI solo, a partir de la versión de `Cargo.toml`. Para sacar la versión `0.4.0`, sube `version = "0.4.0"` en `Cargo.toml` dentro del mismo PR del cambio (o en uno aparte) y fusiónalo a `main`. No hace falta crear tags a mano.
 
-1. Sube `version = "0.2.0"` en `Cargo.toml` y fusiónalo a `main` (con PR, ver abajo).
-2. Crea y sube el tag, **igual** a la versión de `Cargo.toml`:
-   ```sh
-   git checkout main && git pull
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-3. El CI (pestaña **Actions**) compila en macOS y Windows, revisa que el tag coincida con `Cargo.toml` (si no, falla sin publicar nada) y crea el release con `claude-pet-macos` y `claude-pet-windows.exe`.
+En cada push a `main`, el CI (pestaña **Actions**) compila en macOS y Windows y, si todavía no existe el tag `v0.4.0`, crea el tag y el release con `claude-pet-macos` y `claude-pet-windows.exe`. Si la versión no cambió, no publica nada: **un PR que fusionas sin subir la versión no llega a los usuarios**.
 
 Las apps instaladas lo detectan en las siguientes 6 horas, o al momento con "Buscar actualización".
 
