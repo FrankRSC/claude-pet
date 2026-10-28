@@ -145,7 +145,7 @@ fn load_config() -> Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-fn save_config(key: &str, value: Value) {
+pub fn save_config(key: &str, value: Value) {
     let Some(path) = config_path() else { return };
     let mut config = load_config();
     config[key] = value;
@@ -236,6 +236,7 @@ pub fn run(demo: bool, wait: bool) {
     sound::set_enabled(load_config()["sounds"].as_bool().unwrap_or(true));
     let n = skins::reload();
     debug_log(format_args!("{n} avatares en skins.json"));
+    download_pokemon_once();
 
     let now = Instant::now();
     let mut app = App {
@@ -405,6 +406,23 @@ fn in_generation(g: u32) -> Vec<usize> {
 fn tray_icon(index: usize) -> Option<Icon> {
     let (rgba, w, h) = sprites::icon_rgba(index, pet::CLAUDE_ORANGE);
     Icon::from_rgba(rgba, w, h).ok()
+}
+
+/// Quien se actualizó con el botón nunca corrió el `install` que los baja:
+/// si no hay skins.json y nunca se bajaron (ni se pidió `--no-pokemon`), se
+/// bajan en segundo plano y la app se recarga sola. Sin red, al siguiente arranque.
+fn download_pokemon_once() {
+    if !load_config()["pokemon"].is_null() || skins::path().is_none_or(|p| p.exists()) {
+        return;
+    }
+    std::thread::spawn(|| match crate::pokedex::download(|msg| debug_log(format_args!("{msg}"))) {
+        Ok((skins, _)) => {
+            save_config("pokemon", true.into());
+            ipc::send(&serde_json::json!({ "cmd": "reload" }), Duration::from_millis(500));
+            notify("Claude Pet".into(), format!("Llegaron {skins} Pokémon: elígelos en el menú Avatar."));
+        }
+        Err(e) => debug_log(format_args!("Pokémon: {e}")),
+    });
 }
 
 fn notify(summary: String, body: String) {

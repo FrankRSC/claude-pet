@@ -1,6 +1,6 @@
 [package]
 name = "claude-pet"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Un monito de escritorio por cada sesión de Claude Code"
 
@@ -14,6 +14,8 @@ dirs = "6"
 notify = "8.2.0"
 # Decodifica los gritos (Ogg Vorbis); Rust puro, sin dependencias del sistema.
 lewton = "0.10"
+# Lee los iconos de la Pokédex que baja `install` (ya venía con tray-icon).
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -25,7 +25,7 @@ chmod +x claude-pet
 ./claude-pet install
 ```
 
-Con `install`, el binario se copia a `~/Library/Application Support/claude-pet/`, se registran los hooks en cada agente que encuentre instalado (Claude Code, Codex, Gemini CLI, OpenCode; ver [Agentes compatibles](#agentes-compatibles), con respaldo `.bak` de cada archivo que toca) y se agrega un LaunchAgent para que arranque al iniciar sesión.
+Con `install`, el binario se copia a `~/Library/Application Support/claude-pet/`, se registran los hooks en cada agente que encuentre instalado (Claude Code, Codex, Gemini CLI, OpenCode; ver [Agentes compatibles](#agentes-compatibles), con respaldo `.bak` de cada archivo que toca), se bajan los Pokémon (ver [Avatares](#avatares)) y se agrega un LaunchAgent para que arranque al iniciar sesión.
 
 ### Windows
 
@@ -45,17 +45,19 @@ cargo build --release
 target\release\claude-pet.exe install
 ```
 
-Se instala en `%LOCALAPPDATA%\claude-pet\` y arranca solo al iniciar sesión.
+Se instala en `%LOCALAPPDATA%\claude-pet\`, baja los Pokémon y arranca solo al iniciar sesión.
 
 ## Comandos
 
 ```
 claude-pet install [--no-autostart]   # instala hooks en cada agente (y autoarranque)
+claude-pet install --no-pokemon       # sin bajar los Pokémon (solo el Monito)
 claude-pet install --agent codex      # solo en uno: claude, codex, gemini u opencode
 claude-pet uninstall [--agent …]      # quita hooks y autoarranque
 claude-pet run --demo                 # abre la app con un monito de prueba
 claude-pet size <2-5>                 # tamaño en px por celda (3 = normal)
 claude-pet skins <skins.json>         # carga avatares (ver Avatares)
+claude-pet pokemon                    # vuelve a bajar los Pokémon (reemplaza skins.json)
 claude-pet floors                     # diagnóstico: ventanas y plataformas detectadas
 claude-pet restart                    # reinicia la app y vuelve a buscar sesiones abiertas
 claude-pet sound [n]                  # prueba el grito del Pokémon n (sin n, el del sistema)
@@ -121,7 +123,11 @@ La app no sabe de ningún agente en particular: escucha cinco eventos por TCP lo
 
 ## Avatares
 
-De fábrica solo viene el Monito. Los demás se cargan de un archivo `skins.json` en la carpeta de datos (`~/Library/Application Support/claude-pet/` en macOS, `%LOCALAPPDATA%\claude-pet\` en Windows), junto a `config.json`. Para instalar uno:
+El binario solo trae el Monito. Los demás se cargan de un archivo `skins.json` en la carpeta de datos (`~/Library/Application Support/claude-pet/` en macOS, `%LOCALAPPDATA%\claude-pet\` en Windows), junto a `config.json`.
+
+`claude-pet install` deja listos los 809 Pokémon de las generaciones 1 a 7, con nombre en español y su grito: los baja de [PokeAPI](https://pokeapi.co) en tu máquina (unos 13 MB, menos de un minuto), sin Python. De la 8 en adelante PokeAPI no tiene iconos de este estilo. Si ya había un `skins.json` no lo toca; `claude-pet pokemon` los vuelve a bajar. Quien se actualiza con el botón del menú y no tiene `skins.json` los recibe al arrancar la app, en segundo plano y con un aviso al terminar; sin internet, lo intenta en el siguiente arranque. `install --no-pokemon` lo evita.
+
+Para instalar otro archivo de avatares:
 
 ```sh
 claude-pet skins mi-archivo.json
@@ -129,7 +135,7 @@ claude-pet skins mi-archivo.json
 
 Valida el archivo, lo copia ahí y, si la app está corriendo, recarga los menús sin reiniciar. Con más de 30 avatares los menús se agrupan por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto del grupo del aleatorio; las elecciones (avatar fijo, grupo, ícono, avatar por proyecto) se guardan por nombre en `config.json`, así que sobreviven a un `skins.json` nuevo.
 
-El archivo lo genera `tools/pokedex.py` a partir de la Pokédex (ver abajo), pero también se puede escribir a mano:
+El archivo lo generan `claude-pet pokemon` y `tools/pokedex.py` (ver abajo), pero también se puede escribir a mano:
 
 ```json
 {
@@ -156,7 +162,7 @@ Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan 
 
 ### Pokédex
 
-`tools/pokedex.py` convierte los iconos de la Pokédex de [PokeAPI](https://github.com/PokeAPI/sprites) en avatares. Necesita Python 3 y Pillow:
+`install` y `claude-pet pokemon` hacen lo mismo que `tools/pokedex.py` (`src/pokedex.rs`). El script sirve para escoger cuáles, cambiar la rejilla o los colores y revisar el resultado antes de instalarlo. Convierte los iconos de la Pokédex de [PokeAPI](https://github.com/PokeAPI/sprites) en avatares y necesita Python 3 y Pillow:
 
 ```sh
 pip install pillow                                   # o: uv pip install pillow
@@ -167,7 +173,7 @@ claude-pet skins skins.json
 
 Por cada Pokémon descarga el icono de Generación VII (pixel art de 40×30), lo recorta, lo reduce solo si no cabe en 24×24 (nunca se amplía), deja a lo más 12 colores (`--colors`), lo centra con los pies en la última fila y busca los ojos (manchas chicas del color más oscuro en la parte de arriba) para que parpadee; `--no-eyes` lo desactiva. También baja su grito en Ogg Vorbis a `cries/` junto al JSON (unos 7 KB cada uno; `--no-cries` lo evita), y `claude-pet skins` copia esa carpeta. Los nombres salen en español de la API (`--no-names` los evita). Las descargas se guardan en `tools/.cache/`. Con `--preview` escribe una hoja PNG para revisar el resultado antes de instalarlo.
 
-Los sprites son propiedad de Nintendo, Game Freak y Creatures; PokeAPI los distribuye para uso personal. Por eso el repo no incluye ningún `skins.json`: cada quien lo genera (y `.gitignore` ya excluye `skins.json`, los previews y la caché).
+Los sprites son propiedad de Nintendo, Game Freak y Creatures; PokeAPI los distribuye para uso personal. Por eso ni el repo ni el binario incluyen ningún sprite: cada instalación los baja para sí (y `.gitignore` ya excluye `skins.json`, los previews y la caché).
 
 ## Actualizaciones
 
@@ -221,6 +227,7 @@ src/geom.rs         áreas de pantalla y plataformas (bordes de ventanas)
 src/render.rs       dibujo del sprite y los globos (buffer ARGB)
 src/sprites.rs      el Monito, y las poses y el contorno de cada avatar
 src/skins.rs        carga y valida skins.json (avatares en tiempo de ejecución)
+src/pokedex.rs      baja los Pokémon de PokeAPI y los convierte en avatares
 src/hook_client.rs  `claude-pet hook --agent …`: traduce el evento del agente y lo manda a la app
 src/codex.rs        encuentra sesiones de Codex abiertas que todavía no mandaron hooks
 src/sound.rs        gritos (Ogg Vorbis → WAV en memoria) y sonidos del sistema

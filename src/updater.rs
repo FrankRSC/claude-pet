@@ -21,7 +21,7 @@ pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-fn curl() -> Command {
+pub(crate) fn curl() -> Command {
     let mut cmd = Command::new("curl");
     cmd.args(["-fsSL", "--max-time", "120", "-H", "User-Agent: claude-pet"])
         .stdin(Stdio::null())
