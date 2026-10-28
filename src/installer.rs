@@ -133,8 +133,16 @@ impl Agent {
         }
     }
 
+    /// Claude Code en Windows corre los hooks con Git Bash o, si no está (lo
+    /// normal con Claude Desktop), con PowerShell, que no acepta `"ruta" args`.
+    /// La forma exec (`command` + `args`) no pasa por ningún shell.
+    fn exec_form(self) -> bool {
+        cfg!(windows) && self == Agent::Claude
+    }
+
     /// Mete nuestros hooks en `settings`, quitando antes los que hubiera.
-    fn add_hooks(self, settings: &mut Value, command: &str) {
+    /// `bin` es la ruta del ejecutable con `/`; con `exec`, en forma exec.
+    fn add_hooks(self, settings: &mut Value, bin: &str, exec: bool) {
         self.strip_hooks(settings);
         let hooks = settings.as_object_mut().unwrap().entry("hooks").or_insert_with(|| json!({}));
         if !hooks.is_object() {
@@ -145,7 +153,11 @@ impl Agent {
             if !groups.is_array() {
                 *groups = json!([]);
             }
-            let mut hook = json!({ "type": "command", "command": command, "timeout": timeout });
+            let mut hook = if exec {
+                json!({ "type": "command", "command": bin, "args": ["hook", "--agent", self.name()], "timeout": timeout })
+            } else {
+                json!({ "type": "command", "command": format!("\"{bin}\" hook --agent {}", self.name()), "timeout": timeout })
+            };
             let mut group = json!({});
             if self == Agent::Gemini {
                 hook["name"] = MARKER.into();
@@ -186,9 +198,28 @@ impl Agent {
             return Ok(format!("plugin en {}", path.display()));
         }
         let mut settings = read_settings(&path)?;
-        self.add_hooks(&mut settings, &format!("\"{bin}\" hook --agent {}", self.name()));
+        self.add_hooks(&mut settings, &bin, self.exec_form());
         write_settings(&path, &settings)?;
         Ok(format!("hooks en {} (respaldo en .bak)", path.display()))
+    }
+
+    /// Si ya hay hooks nuestros pero no son los que pondría esta versión (el
+    /// actualizador solo cambia el binario), los reescribe. Ok(true) si cambió algo.
+    fn refresh(self, bin: &Path) -> Result<bool, String> {
+        let Some(path) = self.config_path().filter(|p| p.exists()) else { return Ok(false) };
+        let old = read_settings(&path)?;
+        let mut stripped = old.clone();
+        self.strip_hooks(&mut stripped);
+        if stripped == old {
+            return Ok(false); // no hay nada nuestro: no se instaló para este agente
+        }
+        let mut new = old.clone();
+        self.add_hooks(&mut new, &bin.display().to_string().replace('\\', "/"), self.exec_form());
+        if new == old {
+            return Ok(false);
+        }
+        write_settings(&path, &new)?;
+        Ok(true)
     }
 
     /// Ok(None) si no había nada nuestro que quitar.
@@ -334,6 +365,22 @@ pub fn install(autostart: bool, pokemon: bool, agent: &str) {
     println!("Abre una sesión nueva y aparecerá tu monito.");
 }
 
+/// Al arrancar la app: si hay hooks de Claude Code de una versión anterior
+/// que esta pondría distinto (la forma exec en Windows, eventos nuevos), los
+/// pone al día. Solo Claude Code: en Codex un comando cambiado pide aprobarlo
+/// de nuevo.
+pub fn refresh_hooks() {
+    let bin = install_path();
+    if !bin.exists() {
+        return;
+    }
+    match Agent::Claude.refresh(&bin) {
+        Ok(true) => crate::app::debug_log(format_args!("hooks de Claude Code puestos al día")),
+        Ok(false) => {}
+        Err(e) => crate::app::debug_log(format_args!("hooks de Claude Code: {e}")),
+    }
+}
+
 pub fn uninstall(agent: &str) {
     let agents = match agent {
         "all" => Agent::ALL.to_vec(),
@@ -364,7 +411,7 @@ mod tests {
             "model": "x",
             "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo mio" } ] } ] }
         });
-        Agent::Claude.add_hooks(&mut s, "\"/x/claude-pet\" hook --agent claude");
+        Agent::Claude.add_hooks(&mut s, "/x/claude-pet", false);
         assert_eq!(s["model"], "x");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 2, "el hook ajeno sigue ahí");
         assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 10);
@@ -372,7 +419,7 @@ mod tests {
         assert!(s["hooks"]["SessionStart"][0].get("matcher").is_none());
 
         // Instalar dos veces no duplica.
-        Agent::Claude.add_hooks(&mut s, "\"/x/claude-pet\" hook --agent claude");
+        Agent::Claude.add_hooks(&mut s, "/x/claude-pet", false);
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 2);
 
         Agent::Claude.strip_hooks(&mut s);
@@ -381,7 +428,7 @@ mod tests {
 
         // Sin nada nuestro ni ajeno, "hooks" desaparece.
         let mut only_ours = json!({});
-        Agent::Codex.add_hooks(&mut only_ours, "\"/x/claude-pet\" hook --agent codex");
+        Agent::Codex.add_hooks(&mut only_ours, "/x/claude-pet", false);
         assert_eq!(only_ours["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], "\"/x/claude-pet\" hook --agent codex");
         assert_eq!(only_ours["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
         assert!(only_ours["hooks"]["SubagentStop"].is_array());
@@ -390,9 +437,29 @@ mod tests {
     }
 
     #[test]
+    fn exec_form_skips_the_shell_and_replaces_the_old_form() {
+        let mut s = json!({});
+        Agent::Claude.add_hooks(&mut s, "C:/Users/Ana Pérez/AppData/Local/claude-pet/claude-pet.exe", false);
+        let old = s["hooks"]["Stop"][0]["hooks"][0].clone();
+        assert_eq!(old["command"], "\"C:/Users/Ana Pérez/AppData/Local/claude-pet/claude-pet.exe\" hook --agent claude");
+        assert!(old.get("args").is_none());
+
+        // La forma exec reemplaza a la de shell sin duplicar.
+        Agent::Claude.add_hooks(&mut s, "C:/Users/Ana Pérez/AppData/Local/claude-pet/claude-pet.exe", true);
+        let hooks = s["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        let h = &hooks[0]["hooks"][0];
+        assert_eq!(h["command"], "C:/Users/Ana Pérez/AppData/Local/claude-pet/claude-pet.exe");
+        assert_eq!(h["args"], json!(["hook", "--agent", "claude"]));
+        assert_eq!(h["timeout"], 10);
+        Agent::Claude.strip_hooks(&mut s);
+        assert_eq!(s, json!({}), "la forma exec también se reconoce como nuestra");
+    }
+
+    #[test]
     fn gemini_hooks_have_name_matcher_and_milliseconds() {
         let mut s = json!({});
-        Agent::Gemini.add_hooks(&mut s, "\"/x/claude-pet\" hook --agent gemini");
+        Agent::Gemini.add_hooks(&mut s, "/x/claude-pet", false);
         let group = &s["hooks"]["AfterAgent"][0];
         assert_eq!(group["matcher"], "*");
         assert_eq!(group["hooks"][0]["name"], "claude-pet");
