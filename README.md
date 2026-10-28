@@ -56,8 +56,8 @@ claude-pet install --agent codex      # solo en uno: claude, codex, gemini u ope
 claude-pet uninstall [--agent …]      # quita hooks y autoarranque
 claude-pet run --demo                 # abre la app con un monito de prueba
 claude-pet size <2-5>                 # tamaño en px por celda (3 = normal)
-claude-pet skins <skins.json>         # carga avatares (ver Avatares)
-claude-pet pokemon                    # vuelve a bajar los Pokémon (reemplaza skins.json)
+claude-pet skins <archivo.json>       # agrega o reemplaza un estilo de avatares (ver Avatares)
+claude-pet pokemon                    # vuelve a bajar los Pokémon (reemplaza ese estilo)
 claude-pet floors                     # diagnóstico: ventanas y plataformas detectadas
 claude-pet restart                    # reinicia la app y vuelve a buscar sesiones abiertas
 claude-pet sound [n]                  # prueba el grito del Pokémon n (sin n, el del sistema)
@@ -89,8 +89,11 @@ Al aterrizar se aplasta y al saltar se estira; al caminar rebota y en reposo res
 - **Clic:** globo con el proyecto, el agente, su estado y sus crías.
 - **Doble clic:** trae al frente su sesión. En Terminal e iTerm2 selecciona la pestaña exacta (macOS pide permiso de Automatización la primera vez); en VS Code, Cursor y parecidos abre la ventana del repo; en otras apps, la app. Si te está pidiendo atención, basta un clic. En Windows trae la ventana de la consola, sin elegir pestaña.
 - **Arrastrar y soltar:** lo lanzas. Si choca con otro monito, lo tumba. Si lo sueltas sobre una ventana, aterriza en ella.
-- **Clic derecho:** dormir o despertar.
-- **⌥ Option + clic** (Alt + clic en Windows) **o clic central:** cambiar su avatar, solo el de ese monito. Se recuerda para su proyecto; elegir un avatar desde el menú borra esas elecciones.
+- **Clic derecho:** cambiar de estilo, solo ese monito: Base → Pokémon → los que agregues → Base. Toma un avatar del nuevo estilo que no traiga otro monito y lo dice en un globo.
+- **⌥ Option + clic** (Alt + clic en Windows) **o clic central:** el siguiente avatar de su estilo, solo el de ese monito.
+- **⇧ Shift + clic:** dormir o despertar.
+
+Lo que eliges monito por monito se recuerda para su proyecto; elegir un avatar desde el menú borra esas elecciones.
 - **Pasar el cursor encima:** se detiene y se pone feliz. A veces te persigue.
 
 **Con la pantalla:**
@@ -99,8 +102,8 @@ Al aterrizar se aplasta y al saltar se estira; al caminar rebota y en reposo res
 
 **Bandeja / barra de menú:** monito de prueba, Avatar, Grupo del aleatorio, Ícono de la barra, Tamaño, ocultar, notificaciones on/off, sonidos on/off, buscar actualización, reiniciar, salir. La configuración se guarda en `config.json` junto al binario instalado.
 
-- **Avatar:** uno fijo para todos los monitos, o "Aleatorio" (uno distinto por sesión).
-- **Grupo del aleatorio:** qué avatares entran en el sorteo (y por los que pasa ⌥+clic). Cada uno se quita o se añade con su palomita; "Toda la generación N" mete o saca la generación completa y "Todos" vuelve a incluirlos todos. Si quitas todos, se sortea entre todos.
+- **Avatar:** uno fijo para todos los monitos, o "Aleatorio" (uno distinto por sesión). Agrupados por estilo y, en los Pokémon, por generación.
+- **Grupo del aleatorio:** qué avatares entran en el sorteo (y por los que pasan el clic derecho y ⌥+clic). Cada uno se quita o se añade con su palomita; "Todo Base", "Todo Pokémon"… meten o sacan un estilo completo, "Toda la generación N" la generación completa y "Todos" vuelve a incluirlos todos. Si quitas todos, se sortea entre todos.
 - **Sonidos:** cada Pokémon suena con su grito al aparecer, al terminar, al pedir permiso y, más bajito, al nacer una cría. El Monito y los avatares sin grito usan sonidos del sistema. Nunca suena más de uno cada 1.5 s, el permiso de un mismo monito suena a lo más cada 20 s, y las sesiones que la app encuentra al arrancar o reiniciar no suenan.
 - **Ícono de la barra:** qué avatar se dibuja en la barra de menú o la bandeja. Por defecto, un Pokémon del grupo al azar en cada arranque (el Monito solo si no hay avatares cargados); elige uno para fijarlo.
 
@@ -115,6 +118,7 @@ La app no sabe de ningún agente en particular: escucha cinco eventos por TCP lo
 | Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` → UserPromptSubmit, `AfterAgent` → Stop |
 | OpenCode | plugin en `~/.config/opencode/plugins/claude-pet.ts` | `session.created`, `chat.message`, `session.idle`, `permission.asked`, `session.deleted`; las sesiones hijas son crías |
 
+- **Claude Desktop:** las sesiones de la pestaña **Code** usan los mismos hooks de `~/.claude/settings.json`, así que también tienen monito, con "Claude Desktop" en el globo y en los avisos. El monito queda atado al proceso de esa sesión (`CLAUDE_PID`) y el doble clic trae al frente Claude Desktop. Los chats normales de Claude Desktop no tienen hooks y no tienen monito.
 - **Codex** no ejecuta hooks que no hayas aprobado: tras instalar, abre Codex y ejecuta `/hooks` para aprobar el de claude-pet. Si lo saltas no habrá monito ni ningún error visible. Si el comando cambia (por ejemplo, al reinstalar en otra ruta) hay que aprobarlo de nuevo, y cada evento nuevo (como `SubagentStart` y `SubagentStop` para las crías) también pide su aprobación.
 - **Sesiones de Codex ya abiertas:** Codex solo dispara hooks al empezar un turno, así que una sesión abierta o reanudada a la que no le has escrito no avisaría. En macOS la app las busca sola al arrancar, al reiniciar y cada 15 s: toma cada proceso `codex` de terminal (no el daemon `codex app-server`), su carpeta, y el rollout más reciente de `~/.codex/sessions` con esa carpeta. El monito queda atado a ese proceso y se va cuando cierras Codex. En Windows esto no está disponible (el sistema no da la carpeta de otro proceso) y el monito aparece con el primer prompt.
 - **OpenCode** no tiene hooks de shell, así que va un plugin que recibe los eventos en proceso y ejecuta el binario. Ignora las sesiones de subagentes y el "idle" inicial de cada sesión (no es un "¡Listo!"), y manda el PID de OpenCode para que el monito se vaya cuando lo cierres.
@@ -123,22 +127,27 @@ La app no sabe de ningún agente en particular: escucha cinco eventos por TCP lo
 
 ## Avatares
 
-El binario solo trae el Monito. Los demás se cargan de un archivo `skins.json` en la carpeta de datos (`~/Library/Application Support/claude-pet/` en macOS, `%LOCALAPPDATA%\claude-pet\` en Windows), junto a `config.json`.
+Los avatares van en estilos:
 
-`claude-pet install` deja listos los 809 Pokémon de las generaciones 1 a 7, con nombre en español y su grito: los baja de [PokeAPI](https://pokeapi.co) en tu máquina (unos 13 MB, menos de un minuto), sin Python. De la 8 en adelante PokeAPI no tiene iconos de este estilo. Si ya había un `skins.json` no lo toca; `claude-pet pokemon` los vuelve a bajar. Quien se actualiza con el botón del menú y no tiene `skins.json` los recibe al arrancar la app, en segundo plano y con un aviso al terminar; sin internet, lo intenta en el siguiente arranque. `install --no-pokemon` lo evita.
+- **Base:** el Monito y 23 dibujados a mano (Gato, Perro, Robot, Fantasma, Alien, Panda, Ninja, Astronauta…). Vienen en el binario (`assets/base.json`).
+- **Pokémon:** los baja `install` (abajo).
+- **Los que agregues:** cada estilo es un archivo en `estilos/` dentro de la carpeta de datos (`~/Library/Application Support/claude-pet/` en macOS, `%LOCALAPPDATA%\claude-pet\` en Windows), junto a `config.json`. Aparecen en el menú y en el clic derecho en orden de nombre de archivo, después de Base.
 
-Para instalar otro archivo de avatares:
+`claude-pet install` deja listos los 809 Pokémon de las generaciones 1 a 7, con nombre en español y su grito: los baja de [PokeAPI](https://pokeapi.co) en tu máquina (unos 13 MB, menos de un minuto), sin Python. De la 8 en adelante PokeAPI no tiene iconos de este estilo. Si ya estaban no los vuelve a bajar; `claude-pet pokemon` lo fuerza. Quien se actualiza con el botón del menú y no los tiene los recibe al arrancar la app, en segundo plano y con un aviso al terminar; sin internet, lo intenta en el siguiente arranque. `install --no-pokemon` lo evita.
+
+Para agregar un estilo:
 
 ```sh
 claude-pet skins mi-archivo.json
 ```
 
-Valida el archivo, lo copia ahí y, si la app está corriendo, recarga los menús sin reiniciar. Con más de 30 avatares los menús se agrupan por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto del grupo del aleatorio; las elecciones (avatar fijo, grupo, ícono, avatar por proyecto) se guardan por nombre en `config.json`, así que sobreviven a un `skins.json` nuevo.
+Valida el archivo, lo guarda como `estilos/<estilo>.json` (si ya había uno de ese estilo, lo reemplaza) y, si la app está corriendo, recarga los menús sin reiniciar. Un estilo con más de 30 avatares se agrupa por generación (según el `id` de cada uno). Por defecto cada sesión recibe un avatar distinto del grupo del aleatorio; las elecciones (avatar fijo, grupo, ícono, avatar por proyecto) se guardan por nombre en `config.json`, así que sobreviven a un archivo nuevo. El `skins.json` de versiones anteriores pasa solo a `estilos/`.
 
-El archivo lo generan `claude-pet pokemon` y `tools/pokedex.py` (ver abajo), pero también se puede escribir a mano:
+Los de Pokémon los generan `claude-pet pokemon` y `tools/pokedex.py` (ver abajo), pero un estilo también se puede escribir a mano:
 
 ```json
 {
+  "style": "Pokémon",
   "grid": 24,
   "skins": [
     {
@@ -152,13 +161,14 @@ El archivo lo generan `claude-pet pokemon` y `tools/pokedex.py` (ver abajo), per
 }
 ```
 
+- `style`: el nombre del estilo en el menú. Sin él, "Pokémon" si los avatares traen `id`, y si no "Personalizados".
 - `rows`: `grid` filas de `grid` caracteres; `.` es transparente y los pies van en la última fila. Una fila con la mitad de caracteres se refleja (sprite simétrico). Si `grid` es menor que 24, el sprite se centra y se alinea al suelo.
 - `palette`: un color `[r, g, b]` por carácter.
 - `eyes` (opcional): celdas `[x, y]` que se cierran al parpadear y al dormir. También sirve `"eye": "k"` para marcar todas las celdas de un carácter.
 - `id` (opcional): número de Pokédex, solo para agrupar el menú.
 - `facing` (opcional): `"left"` si el dibujo mira a la izquierda, como los iconos de la Pokédex. La app lo voltea al cargar, porque asume que todo mira a la derecha y lo voltea al caminar hacia la izquierda.
 
-Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. Un avatar mal formado se omite (con `CLAUDE_PET_DEBUG=1` queda en el log) y no tumba la app. `cargo test` valida el `skins.json` instalado y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
+Las poses (parpadeo, caminar, salto, sentado, dormido) y el contorno se generan solos. Un avatar mal formado se omite (con `CLAUDE_PET_DEBUG=1` queda en el log) y no tumba la app. `cargo test` valida los estilos instalados y genera `target/avatars.png` y `target/avatars_big.png` para verlos.
 
 ### Pokédex
 
@@ -219,7 +229,7 @@ src/pet.rs          física y máquina de estados
 src/geom.rs         áreas de pantalla y plataformas (bordes de ventanas)
 src/render.rs       dibujo del sprite y los globos (buffer ARGB)
 src/sprites.rs      el Monito, y las poses y el contorno de cada avatar
-src/skins.rs        carga y valida skins.json (avatares en tiempo de ejecución)
+src/skins.rs        estilos de avatares: Base (assets/base.json) y los de estilos/
 src/pokedex.rs      baja los Pokémon de PokeAPI y los convierte en avatares
 src/hook_client.rs  `claude-pet hook --agent …`: traduce el evento del agente y lo manda a la app
 src/codex.rs        encuentra sesiones de Codex abiertas que todavía no mandaron hooks

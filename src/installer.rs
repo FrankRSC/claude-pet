@@ -314,12 +314,12 @@ pub fn install(autostart: bool, pokemon: bool, agent: &str) {
     if autostart {
         platform::set_autostart(Some(&dst));
     }
-    // Con la app cerrada, para que arranque ya con ellos. Si ya hay avatares
-    // (de una instalación anterior o hechos a mano) no se tocan.
+    // Con la app cerrada, para que arranque ya con ellos. Si ya estaban (de
+    // una instalación anterior) no se vuelven a bajar.
     if !pokemon {
         // Que la app tampoco los baje al arrancar.
         crate::app::save_config("pokemon", false.into());
-    } else if crate::skins::path().is_some_and(|p| !p.exists()) {
+    } else if !crate::skins::has_pokemon() {
         crate::pokedex::install();
     }
     platform::spawn_detached(&dst, &["run"]);

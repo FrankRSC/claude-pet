@@ -83,8 +83,10 @@ struct Tray {
     avatars: Vec<CheckMenuItem>,
     /// [i] = avatar i entra en el aleatorio.
     pool: Vec<CheckMenuItem>,
-    /// "Toda la generación N": la mete o saca completa del aleatorio.
-    pool_gens: Vec<(u32, CheckMenuItem)>,
+    /// "Todo el estilo": lo mete o saca completo del aleatorio.
+    pool_styles: Vec<(String, CheckMenuItem)>,
+    /// "Toda la generación N" de un estilo: la mete o saca completa del aleatorio.
+    pool_gens: Vec<((String, u32), CheckMenuItem)>,
     pool_all: MenuId,
     /// [0] = "Aleatorio"; [i + 1] = avatar i como ícono de la barra.
     icons: Vec<CheckMenuItem>,
@@ -296,8 +298,9 @@ fn watch_sessions(proxy: EventLoopProxy<UserEvent>) -> Option<notify::Recommende
     Some(watcher)
 }
 
-/// (session_id, pid, cwd) de cada registro en ~/.claude/sessions, vivo o no.
-fn session_records() -> Vec<(String, u32, String)> {
+/// (session_id, pid, cwd, es de Claude Desktop) de cada registro en
+/// ~/.claude/sessions, vivo o no.
+fn session_records() -> Vec<(String, u32, String, bool)> {
     let Some(Ok(entries)) = sessions_dir().map(std::fs::read_dir) else { return Vec::new() };
     entries
         .flatten()
@@ -307,7 +310,8 @@ fn session_records() -> Vec<(String, u32, String)> {
         .filter_map(|v| {
             let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?.to_string();
             let pid = v["pid"].as_u64()? as u32;
-            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string()))
+            let desktop = v["entrypoint"].as_str().is_some_and(crate::hook_client::is_desktop);
+            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string(), desktop))
         })
         .collect()
 }
@@ -366,41 +370,77 @@ fn agent_display(name: &str) -> String {
     }
 }
 
-/// Un ítem con palomita por avatar (índice = avatar) dentro de `menu`. Con
-/// pocos avatares van directo; con una Pokédex entera, en submenús por
-/// generación, que se devuelven por si hay que ponerles cabecera.
-fn avatar_items(menu: &Submenu, checked: impl Fn(usize) -> bool) -> (Vec<CheckMenuItem>, Vec<(u32, Submenu)>) {
-    let n = sprites::count();
-    let mut items = Vec::with_capacity(n);
-    let mut gens: Vec<(u32, Submenu)> = Vec::new();
-    for i in 0..n {
-        let item = CheckMenuItem::new(sprites::name(i), true, checked(i), None);
-        match sprites::generation(i).filter(|_| n > GROUP_FROM) {
-            None => {
-                let _ = menu.append(&item);
-            }
-            Some(g) => {
-                let k = match gens.iter().position(|(k, _)| *k == g) {
-                    Some(k) => k,
-                    None => {
-                        gens.push((g, Submenu::new(format!("Generación {g}"), true)));
-                        gens.len() - 1
-                    }
-                };
-                let _ = gens[k].1.append(&item);
-            }
-        }
-        items.push(item);
-    }
-    for (_, sub) in &gens {
-        let _ = menu.append(sub);
-    }
-    (items, gens)
+/// Submenús que arma `avatar_items`, por si hay que ponerles cabecera.
+struct Groups {
+    /// Un submenú por estilo (vacío si solo hay uno).
+    styles: Vec<(String, Submenu)>,
+    /// Dentro de un estilo grande (la Pokédex), un submenú por generación.
+    gens: Vec<((String, u32), Submenu)>,
 }
 
-/// Avatares de la generación `g`.
-fn in_generation(g: u32) -> Vec<usize> {
-    (0..sprites::count()).filter(|&i| sprites::generation(i) == Some(g)).collect()
+/// Un ítem con palomita por avatar (índice = avatar) dentro de `menu`. Con
+/// más de un estilo, un submenú por estilo; dentro de un estilo grande (una
+/// Pokédex entera), submenús por generación.
+fn avatar_items(menu: &Submenu, checked: impl Fn(usize) -> bool) -> (Vec<CheckMenuItem>, Groups) {
+    let items: Vec<CheckMenuItem> =
+        (0..sprites::count()).map(|i| CheckMenuItem::new(sprites::name(i), true, checked(i), None)).collect();
+    let all = styles();
+    let mut groups = Groups { styles: Vec::new(), gens: Vec::new() };
+    for style in &all {
+        let sub = Submenu::new(style, true);
+        let target = if all.len() > 1 { &sub } else { menu };
+        let members = in_style(style);
+        let by_gen = members.len() > GROUP_FROM;
+        let mut gens: Vec<((String, u32), Submenu)> = Vec::new();
+        for i in members {
+            match sprites::generation(i).filter(|_| by_gen) {
+                None => {
+                    let _ = target.append(&items[i]);
+                }
+                Some(g) => {
+                    let k = match gens.iter().position(|((_, k), _)| *k == g) {
+                        Some(k) => k,
+                        None => {
+                            gens.push(((style.clone(), g), Submenu::new(format!("Generación {g}"), true)));
+                            gens.len() - 1
+                        }
+                    };
+                    let _ = gens[k].1.append(&items[i]);
+                }
+            }
+        }
+        for (_, g) in &gens {
+            let _ = target.append(g);
+        }
+        groups.gens.extend(gens);
+        if all.len() > 1 {
+            let _ = menu.append(&sub);
+            groups.styles.push((style.clone(), sub));
+        }
+    }
+    (items, groups)
+}
+
+/// Estilos en el orden de los avatares: Base primero.
+fn styles() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..sprites::count() {
+        let s = sprites::style(i);
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Avatares del estilo.
+fn in_style(style: &str) -> Vec<usize> {
+    (0..sprites::count()).filter(|&i| sprites::style(i) == style).collect()
+}
+
+/// Avatares de la generación `g` del estilo.
+fn in_generation(style: &str, g: u32) -> Vec<usize> {
+    in_style(style).into_iter().filter(|&i| sprites::generation(i) == Some(g)).collect()
 }
 
 fn tray_icon(index: usize) -> Option<Icon> {
@@ -409,10 +449,11 @@ fn tray_icon(index: usize) -> Option<Icon> {
 }
 
 /// Quien se actualizó con el botón nunca corrió el `install` que los baja:
-/// si no hay skins.json y nunca se bajaron (ni se pidió `--no-pokemon`), se
-/// bajan en segundo plano y la app se recarga sola. Sin red, al siguiente arranque.
+/// si no está el estilo Pokémon y nunca se bajaron (ni se pidió
+/// `--no-pokemon`), se bajan en segundo plano y la app se recarga sola. Sin
+/// red, al siguiente arranque.
 fn download_pokemon_once() {
-    if !load_config()["pokemon"].is_null() || skins::path().is_none_or(|p| p.exists()) {
+    if !load_config()["pokemon"].is_null() || skins::has_pokemon() {
         return;
     }
     std::thread::spawn(|| match crate::pokedex::download(|msg| debug_log(format_args!("{msg}"))) {
@@ -458,21 +499,28 @@ impl App {
         let (mut avatars, _) = avatar_items(&avatar_menu, |i| choice == Some(i));
         avatars.insert(0, random);
 
-        // Grupo del aleatorio: qué avatares entran. Cada generación trae un
-        // ítem para meterla o sacarla completa.
+        // Grupo del aleatorio: qué avatares entran. Cada estilo y cada
+        // generación traen un ítem para meterlos o sacarlos completos.
         let pool_menu = Submenu::new("Grupo del aleatorio", true);
         let all = MenuItem::new("Todos", true, None);
         let _ = pool_menu.append(&all);
         let _ = pool_menu.append(&PredefinedMenuItem::separator());
         let excluded = &self.excluded;
-        let (pool, gens) = avatar_items(&pool_menu, |i| !excluded.contains(&sprites::name(i)));
+        let (pool, groups) = avatar_items(&pool_menu, |i| !excluded.contains(&sprites::name(i)));
+        let whole = |which: Vec<usize>| which.into_iter().all(|i| pool[i].is_checked());
         let mut pool_gens = Vec::new();
-        for (g, sub) in &gens {
-            let whole = in_generation(*g).into_iter().all(|i| pool[i].is_checked());
-            let item = CheckMenuItem::new(format!("Toda la generación {g}"), true, whole, None);
+        for ((style, g), sub) in &groups.gens {
+            let item = CheckMenuItem::new(format!("Toda la generación {g}"), true, whole(in_generation(style, *g)), None);
             let _ = sub.prepend(&PredefinedMenuItem::separator());
             let _ = sub.prepend(&item);
-            pool_gens.push((*g, item));
+            pool_gens.push(((style.clone(), *g), item));
+        }
+        let mut pool_styles = Vec::new();
+        for (style, sub) in &groups.styles {
+            let item = CheckMenuItem::new(format!("Todo {style}"), true, whole(in_style(style)), None);
+            let _ = sub.prepend(&PredefinedMenuItem::separator());
+            let _ = sub.prepend(&item);
+            pool_styles.push((style.clone(), item));
         }
 
         let icon_menu = Submenu::new("Ícono de la barra", true);
@@ -519,6 +567,7 @@ impl App {
                 sounds,
                 avatars,
                 pool,
+                pool_styles,
                 pool_gens,
                 pool_all: all.id().clone(),
                 icons,
@@ -576,8 +625,12 @@ impl App {
             for &i in which {
                 tray.pool[i].set_checked(on);
             }
-            for (g, item) in &tray.pool_gens {
-                item.set_checked(in_generation(*g).into_iter().all(|i| tray.pool[i].is_checked()));
+            let whole = |which: Vec<usize>| which.into_iter().all(|i| tray.pool[i].is_checked());
+            for ((style, g), item) in &tray.pool_gens {
+                item.set_checked(whole(in_generation(style, *g)));
+            }
+            for (style, item) in &tray.pool_styles {
+                item.set_checked(whole(in_style(style)));
             }
         }
     }
@@ -621,15 +674,45 @@ impl App {
         pw.look = sprites::look(avatar, pw.pet.color);
     }
 
-    /// Clic central o ⌥+clic: el siguiente avatar del grupo, solo para este
-    /// monito. Se recuerda para su proyecto.
+    /// Los del grupo del aleatorio que son del estilo (si no queda ninguno, todo el estilo).
+    fn pool_in(&self, style: &str) -> Vec<usize> {
+        let members = in_style(style);
+        let pool: Vec<usize> = self.pool().into_iter().filter(|i| members.contains(i)).collect();
+        if pool.is_empty() { members } else { pool }
+    }
+
+    /// Clic central o ⌥+clic: el siguiente avatar de su estilo, solo para
+    /// este monito. Se recuerda para su proyecto.
     fn next_avatar(&mut self, idx: usize) {
-        let pool = self.pool();
+        let pool = self.pool_in(&sprites::style(self.pets[idx].avatar));
         let cur = pool.iter().position(|&i| i == self.pets[idx].avatar);
         let next = pool[cur.map_or(0, |c| (c + 1) % pool.len())];
         let pw = &mut self.pets[idx];
         Self::set_avatar(pw, next);
         pw.pet.say(sprites::name(next), 1.5);
+        save_project_avatar(&pw.pet.label, next);
+    }
+
+    /// Clic derecho: pasa este monito al siguiente estilo (Base → Pokémon →
+    /// … → Base), con un avatar de ese estilo que no traiga otro monito. Se
+    /// recuerda para su proyecto.
+    fn next_style(&mut self, idx: usize) {
+        let all = styles();
+        if all.len() < 2 {
+            return self.pets[idx].pet.say("Solo hay un estilo", 1.5);
+        }
+        let cur = sprites::style(self.pets[idx].avatar);
+        let k = all.iter().position(|s| *s == cur).unwrap_or(0);
+        let style = &all[(k + 1) % all.len()];
+        let pool = self.pool_in(style);
+        let start = (hash(&format!("{}{style}", self.pets[idx].pet.session)) % pool.len() as u64) as usize;
+        let next = (0..pool.len())
+            .map(|k| pool[(start + k) % pool.len()])
+            .find(|i| self.pets.iter().all(|pw| pw.avatar != *i))
+            .unwrap_or(pool[start]);
+        let pw = &mut self.pets[idx];
+        Self::set_avatar(pw, next);
+        pw.pet.say(format!("{style}: {}", sprites::name(next)), 1.5);
         save_project_avatar(&pw.pet.label, next);
     }
 
@@ -718,7 +801,7 @@ impl App {
     }
 
     fn scan_sessions(&mut self, el: &ActiveEventLoop) {
-        for (session, pid, cwd) in session_records() {
+        for (session, pid, cwd, desktop) in session_records() {
             if self.scanned.contains(&session) || !platform::pid_alive(pid) {
                 continue;
             }
@@ -729,6 +812,7 @@ impl App {
                     "session_id": session,
                     "cwd": cwd,
                     "pet_pid": pid,
+                    "desktop": desktop,
                     "scan": true,
                 }),
             );
@@ -781,7 +865,10 @@ impl App {
         let Some(session) = v["session_id"].as_str().filter(|s| !s.is_empty()) else { return };
         let pid = v["pet_pid"].as_u64().map(|p| p as u32);
         // Los hooks de versiones anteriores no mandan "agent": son de Claude Code.
-        let agent = agent_display(v["agent"].as_str().unwrap_or("claude"));
+        let agent = match v["desktop"].as_bool() {
+            Some(true) => "Claude Desktop".to_string(),
+            _ => agent_display(v["agent"].as_str().unwrap_or("claude")),
+        };
         debug_log(format_args!("hook {agent} {event} {session} pid={pid:?}"));
 
         let (idx, created) = match self.pets.iter().position(|p| p.pet.session == session) {
@@ -918,9 +1005,12 @@ impl App {
                 // El ítem ya cambió de estado solo; lo leemos.
                 let on = tray.pool[k].is_checked();
                 self.set_in_pool(&[k], on);
-            } else if let Some(k) = tray.pool_gens.iter().position(|(_, item)| *item.id() == ev.id) {
-                let (g, on) = (tray.pool_gens[k].0, tray.pool_gens[k].1.is_checked());
-                self.set_in_pool(&in_generation(g), on);
+            } else if let Some(((style, g), item)) = tray.pool_gens.iter().find(|(_, item)| *item.id() == ev.id) {
+                let (which, on) = (in_generation(style, *g), item.is_checked());
+                self.set_in_pool(&which, on);
+            } else if let Some((style, item)) = tray.pool_styles.iter().find(|(_, item)| *item.id() == ev.id) {
+                let (which, on) = (in_style(style), item.is_checked());
+                self.set_in_pool(&which, on);
             } else if ev.id == tray.pool_all {
                 let all: Vec<usize> = (0..sprites::count()).collect();
                 self.set_in_pool(&all, true);
@@ -1222,6 +1312,12 @@ impl ApplicationHandler<UserEvent> for App {
         if button == MouseButton::Middle || (button == MouseButton::Left && platform::alt_down()) {
             return self.next_avatar(idx);
         }
+        if button == MouseButton::Right {
+            return self.next_style(idx);
+        }
+        if button == MouseButton::Left && platform::shift_down() {
+            return self.pets[idx].pet.toggle_sleep();
+        }
         let pw = &mut self.pets[idx];
         match button {
             MouseButton::Left => {
@@ -1237,7 +1333,6 @@ impl ApplicationHandler<UserEvent> for App {
                     vel: (0.0, 0.0),
                 });
             }
-            MouseButton::Right => pw.pet.toggle_sleep(),
             _ => {}
         }
     }

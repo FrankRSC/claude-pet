@@ -234,6 +234,14 @@ pub fn id(index: usize) -> Option<u32> {
     }
 }
 
+/// Estilo del avatar; el Monito es del Base.
+pub fn style(index: usize) -> String {
+    match index {
+        0 => skins::BASE.into(),
+        i => skins::with(|s| s.get(i - 1).map_or_else(|| skins::BASE.into(), |k| k.style.clone())),
+    }
+}
+
 /// Generación del Pokémon (por su número), para agrupar el menú. None para el
 /// Monito y los avatares sin `id`.
 pub fn generation(index: usize) -> Option<u32> {
@@ -412,6 +420,7 @@ pub(crate) mod tests {
         Skin {
             id: None,
             name: "t".into(),
+            style: "t".into(),
             rows: full,
             palette: vec![(b'a', [200, 100, 50]), (b'k', [0, 0, 0])],
             eyes: eyes.iter().map(|&(x, y)| (ox + x, oy + y)).collect(),

@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Map, Value};
 
+use crate::skins::POKEMON;
 use crate::sprites::GRID;
 use crate::updater::curl;
 
@@ -35,13 +36,13 @@ pub fn install() {
     match download(|msg| println!("{msg}")) {
         Ok((skins, cries)) => {
             crate::app::save_config("pokemon", true.into());
-            println!("{skins} Pokémon y {cries} gritos listos; están en el menú Avatar.")
+            println!("{skins} Pokémon y {cries} gritos listos; están en el menú Avatar → Pokémon.")
         }
         Err(e) => eprintln!("{e}. La app lo vuelve a intentar al arrancar, o corre `claude-pet pokemon`."),
     }
 }
 
-/// Baja los Pokémon 1..=`LAST` y escribe `skins.json` y `cries/` en la
+/// Baja los Pokémon 1..=`LAST` y escribe el estilo Pokémon y `cries/` en la
 /// carpeta de datos. Devuelve (avatares, gritos).
 pub fn download(log: impl Fn(&str)) -> Result<(usize, usize), String> {
     let dir = crate::skins::dir().ok_or("No encuentro la carpeta de datos")?;
@@ -100,10 +101,9 @@ fn download_into(dir: &Path, tmp: &Path, log: &dyn Fn(&str)) -> Result<(usize, u
         }
     }
 
-    let text = serde_json::to_string(&json!({ "grid": GRID, "skins": skins })).unwrap() + "\n";
+    let text = serde_json::to_string(&json!({ "style": POKEMON, "grid": GRID, "skins": skins })).unwrap();
     let (loaded, _) = crate::skins::parse(&text)?;
-    let path = crate::skins::path().ok_or("No encuentro la carpeta de datos")?;
-    std::fs::write(&path, text).map_err(|e| format!("No pude escribir {}: {e}", path.display()))?;
+    crate::skins::write_style(POKEMON, &text)?;
     Ok((loaded.len(), cries))
 }
 

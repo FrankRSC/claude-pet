@@ -263,7 +263,7 @@ def main() -> int:
                 cries += 1
         print(f"#{pid:04d} {name}: {len(palette)} colores" + (f", ojos en {eyes}" if eyes else ""))
 
-    Path(args.out).write_text(json.dumps({"grid": args.grid, "skins": skins}, ensure_ascii=False, indent=1) + "\n")
+    Path(args.out).write_text(json.dumps({"style": "Pokémon", "grid": args.grid, "skins": skins}, ensure_ascii=False, indent=1) + "\n")
     print(f"{len(skins)} avatares en {args.out} ({with_eyes} con ojos)")
     if not args.no_cries:
         print(f"{cries} gritos en {cries_dir}")
