@@ -9,6 +9,7 @@ mod installer;
 mod ipc;
 mod pet;
 mod platform;
+mod pokedex;
 mod render;
 mod skins;
 mod sound;
@@ -28,7 +29,13 @@ fn main() {
         "hook" => hook_client::run(value("--agent").as_deref().unwrap_or("claude")),
         "install" => {
             platform::attach_console();
-            installer::install(!has("--no-autostart"), value("--agent").as_deref().unwrap_or("all"));
+            installer::install(!has("--no-autostart"), !has("--no-pokemon"), value("--agent").as_deref().unwrap_or("all"));
+        }
+        "pokemon" => {
+            // Vuelve a bajar los avatares de la Pokédex (reemplaza skins.json).
+            platform::attach_console();
+            pokedex::install();
+            ipc::send(&serde_json::json!({ "cmd": "reload" }), std::time::Duration::from_millis(500));
         }
         "uninstall" => {
             platform::attach_console();
@@ -123,7 +130,7 @@ fn main() {
         _ => {
             platform::attach_console();
             eprintln!(
-                "uso: claude-pet [run [--demo] | hook [--agent <nombre>] | install [--no-autostart] [--agent claude|codex|gemini|opencode|all] | uninstall [--agent …] | skins <archivo.json> | size <n> | sound [n] | focus <pid> | restart | quit]"
+                "uso: claude-pet [run [--demo] | hook [--agent <nombre>] | install [--no-autostart] [--no-pokemon] [--agent claude|codex|gemini|opencode|all] | uninstall [--agent …] | pokemon | skins <archivo.json> | size <n> | sound [n] | focus <pid> | restart | quit]"
             );
         }
     }
