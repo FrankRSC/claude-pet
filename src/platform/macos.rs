@@ -211,6 +211,13 @@ pub fn alt_down() -> bool {
     flags & OPTION != 0
 }
 
+/// ⇧ Shift presionada.
+pub fn shift_down() -> bool {
+    const SHIFT: usize = 1 << 17; // NSEventModifierFlagShift
+    let flags: usize = unsafe { msg_send![class!(NSEvent), modifierFlags] };
+    flags & SHIFT != 0
+}
+
 /// Modo de bajo consumo de macOS (el de la batería) activado.
 pub fn low_power() -> bool {
     unsafe {

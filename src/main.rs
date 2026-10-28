@@ -32,7 +32,7 @@ fn main() {
             installer::install(!has("--no-autostart"), !has("--no-pokemon"), value("--agent").as_deref().unwrap_or("all"));
         }
         "pokemon" => {
-            // Vuelve a bajar los avatares de la Pokédex (reemplaza skins.json).
+            // Vuelve a bajar los avatares de la Pokédex (reemplaza el estilo Pokémon).
             platform::attach_console();
             pokedex::install();
             ipc::send(&serde_json::json!({ "cmd": "reload" }), std::time::Duration::from_millis(500));

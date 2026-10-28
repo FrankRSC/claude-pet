@@ -1,12 +1,15 @@
-//! Avatares cargados en tiempo de ejecución desde `skins.json` (lo genera
-//! `tools/pokedex.py`, o se escribe a mano). El Monito dibujado a mano vive en
-//! `sprites.rs` y siempre es el avatar 0; estos van después, en el orden del
-//! archivo. Las poses y el contorno se generan en `sprites::build`.
+//! Avatares agrupados en estilos. El Monito dibujado a mano vive en
+//! `sprites.rs` y siempre es el avatar 0; después van los del estilo "Base"
+//! (dibujados a mano, dentro del binario: `assets/base.json`) y luego los de
+//! cada archivo de `estilos/` en la carpeta de datos, uno por estilo y en orden
+//! de nombre de archivo (`pokemon.json` lo baja `install`). Las poses y el
+//! contorno se generan en `sprites::build`.
 //!
-//! Formato del archivo:
+//! Formato de cada archivo:
 //!
 //! ```json
 //! {
+//!   "style": "Pokémon",
 //!   "grid": 24,
 //!   "skins": [
 //!     {
@@ -20,6 +23,7 @@
 //! }
 //! ```
 //!
+//! `style` es el nombre del estilo en el menú (sin él, el nombre del archivo).
 //! `grid` es el lado de la rejilla de las filas (si es menor que `GRID`, se
 //! centra y se alinea al suelo). Una fila con la mitad de caracteres se refleja.
 //! `eyes` son celdas (x, y) que se cierran al parpadear o dormir; también se
@@ -39,6 +43,8 @@ pub struct Skin {
     /// Número de Pokédex (o el que ponga el archivo); agrupa el menú por generación.
     pub id: Option<u32>,
     pub name: String,
+    /// Estilo al que pertenece ("Base", "Pokémon"…): agrupa el menú y el clic derecho.
+    pub style: String,
     /// `GRID` filas de `GRID` bytes; `.` es transparente.
     pub rows: Vec<Vec<u8>>,
     pub palette: Vec<(u8, Color)>,
@@ -47,6 +53,12 @@ pub struct Skin {
 }
 
 static SKINS: RwLock<Vec<Skin>> = RwLock::new(Vec::new());
+
+/// El estilo que viene en el binario, con el Monito.
+pub const BASE: &str = "Base";
+const BASE_FILE: &str = include_str!("../assets/base.json");
+/// El estilo que baja `install` (`pokedex.rs`).
+pub const POKEMON: &str = "Pokémon";
 
 /// Rangos de la Pokédex nacional por generación.
 const GENERATIONS: [(u32, u32); 9] = [
@@ -65,14 +77,73 @@ pub fn generation(id: u32) -> Option<u32> {
     GENERATIONS.iter().position(|(a, b)| (*a..=*b).contains(&id)).map(|i| i as u32 + 1)
 }
 
-/// Carpeta de datos de la app (config.json, skins.json, cries/).
+/// Carpeta de datos de la app (config.json, estilos/, cries/).
 pub fn dir() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("claude-pet"))
 }
 
-/// Donde la app busca los avatares: junto a `config.json`.
-pub fn path() -> Option<PathBuf> {
-    Some(dir()?.join("skins.json"))
+/// Un archivo por estilo, junto a `config.json`.
+pub fn styles_dir() -> Option<PathBuf> {
+    Some(dir()?.join("estilos"))
+}
+
+/// Archivo del estilo: `estilos/pokemon.json` para "Pokémon".
+pub fn style_path(style: &str) -> Option<PathBuf> {
+    Some(styles_dir()?.join(format!("{}.json", slug(style))))
+}
+
+fn slug(style: &str) -> String {
+    let plain: String = style
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' => 'a',
+            'é' | 'è' | 'ë' => 'e',
+            'í' | 'ì' | 'ï' => 'i',
+            'ó' | 'ò' | 'ö' => 'o',
+            'ú' | 'ù' | 'ü' => 'u',
+            'ñ' => 'n',
+            c if c.is_ascii_alphanumeric() => c,
+            _ => '-',
+        })
+        .collect();
+    let s = plain.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    if s.is_empty() { "estilo".into() } else { s }
+}
+
+/// Ya están los Pokémon (bajados por `install` o por `claude-pet pokemon`).
+pub fn has_pokemon() -> bool {
+    migrate();
+    style_path(POKEMON).is_some_and(|p| p.exists())
+}
+
+/// Hasta la 0.4 había un solo `skins.json` sin estilo; pasa a `estilos/`.
+fn migrate() {
+    // Los tests leen la carpeta de datos real; no la cambian.
+    if cfg!(test) {
+        return;
+    }
+    let Some(old) = dir().map(|d| d.join("skins.json")).filter(|p| p.exists()) else { return };
+    let Some(mut v) = std::fs::read_to_string(&old).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
+    if !v.is_object() {
+        return;
+    }
+    let style = default_style(&v);
+    v["style"] = style.clone().into();
+    let Some(new) = style_path(&style) else { return };
+    let _ = std::fs::create_dir_all(new.parent().unwrap());
+    if new.exists() || std::fs::write(&new, v.to_string()).is_ok() {
+        let _ = std::fs::remove_file(&old);
+    }
+}
+
+/// El estilo de un archivo que no lo dice: los de la Pokédex traen `id`.
+fn default_style(v: &Value) -> String {
+    if let Some(s) = v["style"].as_str().filter(|s| !s.trim().is_empty()) {
+        return s.trim().to_string();
+    }
+    let pokedex = v["skins"].as_array().is_some_and(|l| l.iter().any(|s| s["id"].is_u64()));
+    if pokedex { POKEMON.into() } else { "Personalizados".into() }
 }
 
 /// Lo que haya cargado, bajo un candado de lectura.
@@ -80,33 +151,44 @@ pub fn with<R>(f: impl FnOnce(&[Skin]) -> R) -> R {
     f(&SKINS.read().unwrap())
 }
 
-/// Vuelve a leer `skins.json` (si existe) y reemplaza la lista. Devuelve
-/// cuántos avatares quedaron; los inválidos se saltan con una línea en el log.
+/// Vuelve a leer el estilo Base y los archivos de `estilos/` y reemplaza la
+/// lista. Devuelve cuántos avatares quedaron; los inválidos se saltan con una
+/// línea en el log.
 pub fn reload() -> usize {
-    let loaded = match path().filter(|p| p.exists()) {
-        Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| parse(&t)) {
-            Ok((skins, errors)) => {
-                for e in errors {
-                    crate::app::debug_log(format_args!("skins.json: {e}"));
-                }
-                skins
+    migrate();
+    let mut files: Vec<PathBuf> = styles_dir()
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    let mut loaded = Vec::new();
+    let mut add = |what: &str, text: Result<String, String>| match text.and_then(|t| parse(&t)) {
+        Ok((skins, errors)) => {
+            for e in errors {
+                crate::app::debug_log(format_args!("{what}: {e}"));
             }
-            Err(e) => {
-                crate::app::debug_log(format_args!("skins.json: {e}"));
-                Vec::new()
-            }
-        },
-        None => Vec::new(),
+            loaded.extend(skins);
+        }
+        Err(e) => crate::app::debug_log(format_args!("{what}: {e}")),
     };
+    add("base.json", Ok(BASE_FILE.to_string()));
+    for f in &files {
+        add(&f.display().to_string(), std::fs::read_to_string(f).map_err(|e| e.to_string()));
+    }
     let n = loaded.len();
     *SKINS.write().unwrap() = loaded;
     n
 }
 
-/// Parsea y valida el archivo. Err si el archivo entero no sirve; si no,
-/// los avatares válidos y un mensaje por cada uno que se descartó.
+/// Parsea y valida un archivo de estilo. Err si el archivo entero no sirve; si
+/// no, los avatares válidos y un mensaje por cada uno que se descartó.
 pub fn parse(text: &str) -> Result<(Vec<Skin>, Vec<String>), String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("no es JSON válido: {e}"))?;
+    let style = default_style(&v);
     let grid = match v.get("grid") {
         None => GRID,
         Some(g) => g.as_u64().map(|g| g as usize).filter(|g| (1..=GRID).contains(g)).ok_or_else(|| {
@@ -117,7 +199,7 @@ pub fn parse(text: &str) -> Result<(Vec<Skin>, Vec<String>), String> {
     let mut skins = Vec::new();
     let mut errors = Vec::new();
     for (i, item) in list.iter().enumerate() {
-        match parse_skin(item, grid) {
+        match parse_skin(item, grid, &style) {
             Ok(s) => skins.push(s),
             Err(e) => {
                 let who = item["name"].as_str().map_or_else(|| format!("#{i}"), str::to_string);
@@ -128,7 +210,7 @@ pub fn parse(text: &str) -> Result<(Vec<Skin>, Vec<String>), String> {
     Ok((skins, errors))
 }
 
-fn parse_skin(v: &Value, grid: usize) -> Result<Skin, String> {
+fn parse_skin(v: &Value, grid: usize, style: &str) -> Result<Skin, String> {
     let name = v["name"].as_str().filter(|n| !n.trim().is_empty()).ok_or("sin \"name\"")?.to_string();
     let id = v["id"].as_u64().map(|n| n as u32);
 
@@ -209,11 +291,11 @@ fn parse_skin(v: &Value, grid: usize) -> Result<Skin, String> {
             }
         }
     }
-    Ok(Skin { id, name, rows, palette, eyes })
+    Ok(Skin { id, name, style: style.to_string(), rows, palette, eyes })
 }
 
-/// `claude-pet skins <archivo>`: valida, copia a la carpeta de datos y pide a
-/// la app que recargue.
+/// `claude-pet skins <archivo>`: valida, lo guarda como el archivo de su
+/// estilo (reemplaza el que hubiera de ese estilo) y pide a la app que recargue.
 pub fn install(src: &Path) {
     let text = match std::fs::read_to_string(src) {
         Ok(t) => t,
@@ -226,17 +308,14 @@ pub fn install(src: &Path) {
     for e in &errors {
         eprintln!("  se omite {e}");
     }
-    let Some(dst) = path() else { return eprintln!("No encuentro la carpeta de datos") };
-    if let Some(dir) = dst.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let Some(style) = skins.first().map(|s| s.style.clone()) else { return eprintln!("{}: sin avatares", src.display()) };
+    if let Err(e) = write_style(&style, &text) {
+        return eprintln!("{e}");
     }
-    if let Err(e) = std::fs::write(&dst, &text) {
-        return eprintln!("No pude escribir {}: {e}", dst.display());
-    }
-    println!("{} avatares en {}", skins.len(), dst.display());
+    println!("{} avatares en el estilo {style}", skins.len());
     // Los gritos que bajó tools/pokedex.py viven en cries/ junto al JSON.
     let cries = src.parent().unwrap_or(Path::new(".")).join("cries");
-    if let (Ok(entries), Some(to)) = (std::fs::read_dir(&cries), dst.parent().map(|d| d.join("cries"))) {
+    if let (Ok(entries), Some(to)) = (std::fs::read_dir(&cries), dir().map(|d| d.join("cries"))) {
         let _ = std::fs::create_dir_all(&to);
         let copied = entries
             .flatten()
@@ -247,10 +326,19 @@ pub fn install(src: &Path) {
     }
     let msg = serde_json::json!({ "cmd": "reload" });
     if crate::ipc::send(&msg, std::time::Duration::from_millis(500)) {
-        println!("Claude Pet ya los tiene; están en el menú Avatar.");
+        println!("Claude Pet ya los tiene; están en el menú Avatar → {style}.");
     } else {
         println!("Claude Pet no está corriendo; los cargará al arrancar.");
     }
+}
+
+/// Guarda `text` como el archivo del estilo, con el `style` puesto.
+pub fn write_style(style: &str, text: &str) -> Result<(), String> {
+    let path = style_path(style).ok_or("No encuentro la carpeta de datos")?;
+    let mut v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    v["style"] = style.into();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    std::fs::write(&path, v.to_string() + "\n").map_err(|e| format!("No pude escribir {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -322,10 +410,32 @@ mod tests {
         assert_eq!(generation(5000), None);
     }
 
-    /// El skins.json instalado (si hay) debe cargar sin descartar nada.
     #[test]
-    fn installed_file_is_well_formed() {
-        for p in [path(), Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/skins.json")))].into_iter().flatten() {
+    fn base_style_loads_whole() {
+        let (skins, errors) = parse(BASE_FILE).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(skins.len(), 23);
+        assert!(skins.iter().all(|s| s.style == BASE && !s.eyes.is_empty()));
+    }
+
+    #[test]
+    fn style_comes_from_the_file_or_its_ids() {
+        let (s, _) = parse(r#"{"style": "Robots", "grid": 1, "skins": [{"name": "R", "rows": ["a"], "palette": {"a": [1, 2, 3]}}]}"#).unwrap();
+        assert_eq!(s[0].style, "Robots");
+        let (s, _) = parse(r#"{"grid": 1, "skins": [{"id": 1, "name": "B", "rows": ["a"], "palette": {"a": [1, 2, 3]}}]}"#).unwrap();
+        assert_eq!(s[0].style, POKEMON, "un skins.json viejo de la Pokédex");
+        let (s, _) = parse(r#"{"grid": 1, "skins": [{"name": "Yo", "rows": ["a"], "palette": {"a": [1, 2, 3]}}]}"#).unwrap();
+        assert_eq!(s[0].style, "Personalizados");
+        assert_eq!(slug(POKEMON), "pokemon");
+        assert_eq!(slug("Mis Ñoños 2!"), "mis-nonos-2");
+        assert_eq!(slug("??"), "estilo");
+    }
+
+    /// Los estilos instalados (si hay) deben cargar sin descartar nada.
+    #[test]
+    fn installed_files_are_well_formed() {
+        let files = styles_dir().and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten().map(|e| e.path());
+        for p in files.filter(|p| p.extension().is_some_and(|x| x == "json")) {
             let Ok(text) = std::fs::read_to_string(&p) else { continue };
             let (skins, errors) = parse(&text).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
             assert!(errors.is_empty(), "{}: {errors:?}", p.display());
