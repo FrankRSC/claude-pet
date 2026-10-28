@@ -18,6 +18,17 @@ pub fn run(agent: &str) {
         return;
     }
     normalize(&mut v, agent);
+    // Claude Code les pasa a sus hooks su PID y desde dónde se abrió (la
+    // terminal o la pestaña Code de Claude Desktop, que usa su propia copia
+    // de Claude Code y cuyo proceso no siempre se llama "claude").
+    if agent == "claude" {
+        if let Some(pid) = std::env::var("CLAUDE_PID").ok().and_then(|p| p.parse::<u32>().ok()).filter(|&p| platform::pid_alive(p)) {
+            v["pet_pid"] = pid.into();
+        }
+        if std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok_and(|e| is_desktop(&e)) {
+            v["desktop"] = true.into();
+        }
+    }
     // El plugin de OpenCode ya manda su PID; a los demás se los buscamos.
     if v["pet_pid"].as_u64().is_none() {
         let names: Vec<&str> = match Agent::from_name(agent) {
@@ -48,6 +59,11 @@ pub fn run(agent: &str) {
     }
 }
 
+/// La sesión es de Claude Desktop (su `entrypoint`; en la terminal es "cli").
+pub fn is_desktop(entrypoint: &str) -> bool {
+    entrypoint.to_lowercase().contains("desktop")
+}
+
 /// Traduce el evento del agente a uno de los cinco que entiende la app
 /// (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd`)
 /// y anota de qué agente viene. Lo que no se reconoce pasa tal cual.
@@ -73,7 +89,7 @@ pub fn normalize(v: &mut Value, agent: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::{is_desktop, normalize};
     use serde_json::json;
 
     fn mapped(agent: &str, event: &str) -> String {
@@ -97,6 +113,14 @@ mod tests {
         // Lo desconocido pasa tal cual (la app lo ignora).
         assert_eq!(mapped("codex", "PreToolUse"), "PreToolUse");
         assert_eq!(mapped("cursor", "Stop"), "Stop");
+    }
+
+    #[test]
+    fn desktop_sessions_are_recognized() {
+        assert!(is_desktop("claude-desktop"));
+        assert!(is_desktop("Claude Desktop"));
+        assert!(!is_desktop("cli"));
+        assert!(!is_desktop("sdk-ts"));
     }
 
     #[test]

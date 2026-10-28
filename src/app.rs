@@ -298,8 +298,9 @@ fn watch_sessions(proxy: EventLoopProxy<UserEvent>) -> Option<notify::Recommende
     Some(watcher)
 }
 
-/// (session_id, pid, cwd) de cada registro en ~/.claude/sessions, vivo o no.
-fn session_records() -> Vec<(String, u32, String)> {
+/// (session_id, pid, cwd, es de Claude Desktop) de cada registro en
+/// ~/.claude/sessions, vivo o no.
+fn session_records() -> Vec<(String, u32, String, bool)> {
     let Some(Ok(entries)) = sessions_dir().map(std::fs::read_dir) else { return Vec::new() };
     entries
         .flatten()
@@ -309,7 +310,8 @@ fn session_records() -> Vec<(String, u32, String)> {
         .filter_map(|v| {
             let session = v["sessionId"].as_str().filter(|s| !s.is_empty())?.to_string();
             let pid = v["pid"].as_u64()? as u32;
-            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string()))
+            let desktop = v["entrypoint"].as_str().is_some_and(crate::hook_client::is_desktop);
+            Some((session, pid, v["cwd"].as_str().unwrap_or("").to_string(), desktop))
         })
         .collect()
 }
@@ -799,7 +801,7 @@ impl App {
     }
 
     fn scan_sessions(&mut self, el: &ActiveEventLoop) {
-        for (session, pid, cwd) in session_records() {
+        for (session, pid, cwd, desktop) in session_records() {
             if self.scanned.contains(&session) || !platform::pid_alive(pid) {
                 continue;
             }
@@ -810,6 +812,7 @@ impl App {
                     "session_id": session,
                     "cwd": cwd,
                     "pet_pid": pid,
+                    "desktop": desktop,
                     "scan": true,
                 }),
             );
@@ -862,7 +865,10 @@ impl App {
         let Some(session) = v["session_id"].as_str().filter(|s| !s.is_empty()) else { return };
         let pid = v["pet_pid"].as_u64().map(|p| p as u32);
         // Los hooks de versiones anteriores no mandan "agent": son de Claude Code.
-        let agent = agent_display(v["agent"].as_str().unwrap_or("claude"));
+        let agent = match v["desktop"].as_bool() {
+            Some(true) => "Claude Desktop".to_string(),
+            _ => agent_display(v["agent"].as_str().unwrap_or("claude")),
+        };
         debug_log(format_args!("hook {agent} {event} {session} pid={pid:?}"));
 
         let (idx, created) = match self.pets.iter().position(|p| p.pet.session == session) {
