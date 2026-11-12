@@ -6,7 +6,6 @@ use serde_json::Value;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
@@ -771,7 +770,7 @@ impl App {
             .with_visible(false)
             .with_active(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_inner_size(PhysicalSize::new(BUF, BUF));
+            .with_inner_size(platform::window_size(BUF));
         let window = el.create_window(platform::window_attributes(attrs)).ok()?;
         let surface = Surface::new(&window, BUF, BUF);
         // Aparece en el monitor donde está el cursor.
@@ -1194,6 +1193,15 @@ impl App {
             // Solo se dibuja y se habla con el sistema de ventanas si algo cambió.
             let pos = ((pet.x - off()).round() as i32, (pet.y - off()).round() as i32);
             if pos != pw.last_pos {
+                // Diagnóstico: un monito no debería moverse tanto de un cuadro a
+                // otro salvo que lo lancen o vaya parado en una ventana que movieron.
+                let (dx, dy) = (pos.0 - pw.last_pos.0, pos.1 - pw.last_pos.1);
+                if pw.last_pos.0 != i32::MIN && dx.abs().max(dy.abs()) > 400 {
+                    debug_log(format_args!(
+                        "salto grande de {}: ({}, {}) → ({}, {}), modo {:?}, sobre ventana: {}",
+                        pet.session, pw.last_pos.0, pw.last_pos.1, pos.0, pos.1, pet.mode, pet.perched()
+                    ));
+                }
                 pw.surface.move_to(&pw.window, pos.0, pos.1);
                 pw.last_pos = pos;
             }

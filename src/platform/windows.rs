@@ -23,6 +23,11 @@ use winit::window::{Window, WindowAttributes};
 
 use crate::geom::Rect;
 
+/// Tamaño de la ventana de un monito: Windows ya trabaja en píxeles físicos.
+pub fn window_size(px: u32) -> winit::dpi::Size {
+    winit::dpi::PhysicalSize::new(px, px).into()
+}
+
 pub fn window_attributes(attrs: WindowAttributes) -> WindowAttributes {
     attrs.with_skip_taskbar(true).with_undecorated_shadow(false)
 }

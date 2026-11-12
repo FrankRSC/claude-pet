@@ -15,7 +15,7 @@ use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 use objc2_foundation::{NSPoint, NSRect};
 use std::os::unix::process::CommandExt;
-use winit::dpi::PhysicalPosition;
+use winit::dpi::{LogicalPosition, LogicalSize, Size};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes};
 
@@ -52,14 +52,23 @@ impl Surface {
             let _: () = msg_send![ns_window, setColorSpace: srgb];
             // canJoinAllSpaces | stationary | ignoresCycle: visible en todos los escritorios.
             let _: () = msg_send![ns_window, setCollectionBehavior: (1usize << 0) | (1 << 4) | (1 << 6)];
+            // En una pantalla con menos densidad que la del escritorio la imagen
+            // se reduce: sin suavizar, para que el pixel art no se emborrone.
+            let nearest: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"nearest".as_ptr()];
+            let _: () = msg_send![layer, setMinificationFilter: nearest];
+            let _: () = msg_send![layer, setMagnificationFilter: nearest];
             let colorspace = CGColorSpace::create_with_name(core_graphics::color_space::kCGColorSpaceSRGB)
                 .unwrap_or_else(CGColorSpace::create_device_rgb);
             Surface { layer, colorspace, w: w as usize, h: h as usize }
         }
     }
 
+    /// (x, y) en coordenadas del escritorio. Se pasa a macOS en puntos: con
+    /// píxeles, winit usaría la densidad de la pantalla donde está la ventana
+    /// y el monito brincaría al cruzar a una pantalla con otra densidad.
     pub fn move_to(&self, window: &Window, x: i32, y: i32) {
-        window.set_outer_position(PhysicalPosition::new(x, y));
+        let s = desktop_scale();
+        window.set_outer_position(LogicalPosition::new(x as f64 / s, y as f64 / s));
     }
 
     pub fn present(&mut self, _window: &Window, buf: &[u32]) {
@@ -105,38 +114,54 @@ unsafe fn screens() -> Vec<(NSRect, NSRect, f64)> {
         .collect()
 }
 
-/// Alto y escala de la pantalla principal. Se usa en cada cuadro (cursor,
-/// ventanas), así que se guarda y solo se recalcula en `work_areas`.
-static MAIN_SCREEN: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+/// Alto de la pantalla principal en puntos. Se usa en cada cuadro (cursor),
+/// así que se guarda y solo se recalcula en `work_areas`.
+static MAIN_HEIGHT: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
 
-fn read_main_screen() -> (f64, f64) {
-    let v = unsafe { screens().first().map(|(f, _, s)| (f.size.height, *s)).unwrap_or((1080.0, 1.0)) };
-    *MAIN_SCREEN.lock().unwrap() = Some(v);
-    v
+fn read_main_height() -> f64 {
+    let h = unsafe { screens().first().map_or(1080.0, |(f, _, _)| f.size.height) };
+    *MAIN_HEIGHT.lock().unwrap() = Some(h);
+    h
 }
 
-fn main_height_and_scale() -> (f64, f64) {
-    let cached = *MAIN_SCREEN.lock().unwrap();
-    cached.unwrap_or_else(read_main_screen)
+fn main_height() -> f64 {
+    let cached = *MAIN_HEIGHT.lock().unwrap();
+    cached.unwrap_or_else(read_main_height)
 }
 
-/// Áreas visibles (sin barra de menú ni Dock) en píxeles físicos.
-pub fn work_areas() -> Vec<Rect> {
-    let (main_h, _) = read_main_screen();
-    unsafe {
-        screens()
-            .into_iter()
-            .map(|(_, v, scale)| {
-                let top = main_h - (v.origin.y + v.size.height);
-                Rect {
-                    l: (v.origin.x * scale) as f32,
-                    t: (top * scale) as f32,
-                    r: ((v.origin.x + v.size.width) * scale) as f32,
-                    b: ((top + v.size.height) * scale) as f32,
-                }
-            })
-            .collect()
+/// Escala del escritorio: todo (pantallas, ventanas, cursor, monitos) se mide
+/// en puntos de macOS por este número, el mismo para todas las pantallas.
+/// Si cada pantalla usara su propia densidad, una Retina (2×) junto a un
+/// monitor normal (1×) se enciman y los monitos se pierden entre ellas. Es la
+/// mayor densidad al arrancar, para que en la Retina el sprite salga 1:1.
+pub fn desktop_scale() -> f64 {
+    static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| unsafe { screens().iter().map(|(_, _, s)| *s).fold(1.0, f64::max) })
+}
+
+/// Tamaño de la ventana de un monito de `px` píxeles del escritorio de lado.
+pub fn window_size(px: u32) -> Size {
+    let side = px as f64 / desktop_scale();
+    LogicalSize::new(side, side).into()
+}
+
+/// Un rectángulo de AppKit (puntos, origen abajo a la izquierda de la pantalla
+/// principal) en coordenadas del escritorio (origen arriba a la izquierda).
+fn to_desktop(r: NSRect, main_h: f64, scale: f64) -> Rect {
+    let top = main_h - (r.origin.y + r.size.height);
+    Rect {
+        l: (r.origin.x * scale) as f32,
+        t: (top * scale) as f32,
+        r: ((r.origin.x + r.size.width) * scale) as f32,
+        b: ((top + r.size.height) * scale) as f32,
     }
+}
+
+/// Áreas visibles (sin barra de menú ni Dock) en coordenadas del escritorio.
+pub fn work_areas() -> Vec<Rect> {
+    let main_h = read_main_height();
+    let scale = desktop_scale();
+    unsafe { screens().into_iter().map(|(_, v, _)| to_desktop(v, main_h, scale)).collect() }
 }
 
 /// Ventanas normales visibles (capa 0), de la de más adelante a la de más atrás.
@@ -150,7 +175,7 @@ pub fn windows() -> Vec<(u64, Rect)> {
         copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
     };
 
-    let (_, scale) = main_height_and_scale();
+    let scale = desktop_scale();
     let Some(list) = copy_window_info(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID,
@@ -194,9 +219,9 @@ pub fn windows() -> Vec<(u64, Rect)> {
 }
 
 pub fn cursor_pos() -> (f32, f32) {
-    let (main_h, scale) = main_height_and_scale();
+    let scale = desktop_scale();
     let p: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
-    ((p.x * scale) as f32, ((main_h - p.y) * scale) as f32)
+    ((p.x * scale) as f32, ((main_height() - p.y) * scale) as f32)
 }
 
 pub fn left_button_down() -> bool {
@@ -563,6 +588,25 @@ pub fn attach_console() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tu escritorio real: MacBook Retina (1512×982 pt, 2×) como principal y
+    /// un iMac de 2560×1440 pt (1×) a la derecha y más arriba.
+    #[test]
+    fn mixed_density_screens_sit_side_by_side() {
+        use objc2_foundation::NSSize;
+        let main_h = 982.0;
+        let macbook = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1512.0, 982.0));
+        let imac = NSRect::new(NSPoint::new(1512.0, -102.0), NSSize::new(2560.0, 1440.0));
+        let a = to_desktop(macbook, main_h, 2.0);
+        let b = to_desktop(imac, main_h, 2.0);
+        assert_eq!((a.l, a.t, a.r, a.b), (0.0, 0.0, 3024.0, 1964.0));
+        // El iMac empieza justo donde termina el MacBook, sin encimarse.
+        assert_eq!(b.l, a.r);
+        assert_eq!((b.t, b.b), (-712.0, 2168.0));
+        // Caminando a la derecha, el monito pasa de una a otra sin pared.
+        let areas = [a, b];
+        assert!(crate::geom::in_any(&areas, a.r + 2.0, 1500.0));
+    }
 
     #[test]
     fn parses_procargs() {
