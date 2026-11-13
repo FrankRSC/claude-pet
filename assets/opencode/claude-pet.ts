@@ -1,85 +1,122 @@
-// Plugin de OpenCode para Claude Pet. OpenCode no tiene hooks de shell: el
-// plugin recibe los eventos en proceso, los traduce a los que entiende la app
-// y los manda con el binario (`claude-pet hook`), que arranca la app si no está
-// corriendo. Lo instala `claude-pet install --agent opencode` en
-// ~/.config/opencode/plugins/ con la ruta real en vez de __CLAUDE_PET_BIN__.
+// Plugin de OpenCode 2 para Claude Pet. OpenCode no tiene hooks de shell: el
+// plugin recibe los eventos en proceso (dentro del servicio `opencode serve`),
+// los traduce a los que entiende la app y los manda con el binario
+// (`claude-pet hook`), que arranca la app si no está corriendo. Lo instala
+// `claude-pet install --agent opencode` en ~/.config/opencode/plugins/ con la
+// ruta real en vez de __CLAUDE_PET_BIN__.
+//
+// Eventos de OpenCode 2 → los de la app:
+//   session.created (sin parentID)          → SessionStart
+//   session.created (con parentID)          → SubagentStart en la sesión padre
+//   session.execution.started               → UserPromptSubmit
+//   session.execution.succeeded/failed/
+//     interrupted (no por apagado)          → Stop (o SubagentStop si es una cría)
+//   permission.asked                        → Notification (la de una cría, en el padre)
+//   session.deleted                         → SessionEnd (o SubagentStop)
 
 const BIN = "__CLAUDE_PET_BIN__"
 
-export const ClaudePet = async ({ $, directory }) => {
-  // Carpeta de cada sesión (es la etiqueta del monito).
-  const dirs = new Map()
-  // Sesiones hijas (subagentes) → { parent, done }: son crías del monito padre.
-  const children = new Map()
-  // Sesiones con un prompt en curso: `session.idle` también llega al crear la
-  // sesión, y eso no es un "¡Listo!".
-  const busy = new Set()
+// OpenCode arranca una instancia del plugin por proyecto abierto y todas
+// reciben todos los eventos: el estado es uno solo y cada evento se atiende
+// una vez.
+const state = (globalThis.__claudePet ??= {
+  seen: new Set(),
+  order: [],
+  // sesión hija (subagente) → { parent, done }
+  children: new Map(),
+  // sesión → carpeta del proyecto (la etiqueta del monito)
+  dirs: new Map(),
+})
 
-  const send = (hook_event_name, session_id, extra = {}) => {
-    if (!session_id) return
-    const payload = JSON.stringify({
-      hook_event_name,
-      session_id,
-      cwd: dirs.get(session_id) ?? directory,
-      agent: "opencode",
-      pet_pid: process.pid,
-      ...extra,
+const firstTime = (id) => {
+  if (!id) return true
+  if (state.seen.has(id)) return false
+  state.seen.add(id)
+  state.order.push(id)
+  if (state.order.length > 1000) state.seen.delete(state.order.shift())
+  return true
+}
+
+const send = (hook_event_name, session_id, extra = {}) => {
+  if (!session_id) return
+  const payload = JSON.stringify({
+    hook_event_name,
+    session_id,
+    cwd: state.dirs.get(session_id) ?? "",
+    agent: "opencode",
+    ...extra,
+  })
+  // Sin shell (las rutas con espacios no estorban) y sin esperar: arrancar la
+  // app puede tardar y eso no debe frenar la sesión. Un fallo tampoco.
+  try {
+    Bun.spawn([BIN, "hook", "--agent", "opencode"], {
+      stdin: new Blob([payload]),
+      stdout: "ignore",
+      stderr: "ignore",
     })
-    // Sin await: si tiene que arrancar la app tarda un par de segundos, y eso
-    // no debe frenar la sesión. Un fallo del hook tampoco.
-    $`${BIN} hook --agent opencode < ${new Response(payload)}`
-      .quiet()
-      .nothrow()
-      .catch(() => {})
-  }
+  } catch {}
+}
 
-  // La cría terminó (o la borraron): avisa una sola vez al padre. Devuelve si
-  // `id` era una cría.
-  const childDone = (id) => {
-    const child = children.get(id)
-    if (!child) return false
-    if (!child.done) {
-      child.done = true
-      send("SubagentStop", child.parent, { agent_id: id })
-    }
-    return true
+// La cría terminó (o la borraron): avisa una sola vez al padre. Devuelve si
+// la sesión era una cría.
+const childDone = (id) => {
+  const child = state.children.get(id)
+  if (!child) return false
+  if (!child.done) {
+    child.done = true
+    send("SubagentStop", child.parent, { agent_id: id })
   }
+  return true
+}
 
-  return {
-    event: async ({ event }) => {
-      const p = event.properties
-      switch (event.type) {
-        case "session.created":
-          if (p.info.parentID) {
-            children.set(p.info.id, { parent: p.info.parentID, done: false })
-            return send("SubagentStart", p.info.parentID, {
-              agent_id: p.info.id,
-              agent_type: p.info.title || "subagente",
-            })
-          }
-          dirs.set(p.info.id, p.info.directory)
-          return send("SessionStart", p.info.id)
-        case "session.idle":
-          if (childDone(p.sessionID)) return
-          if (busy.delete(p.sessionID)) return send("Stop", p.sessionID)
-          return
-        case "permission.asked": // OpenCode actual
-        case "permission.updated": // SDK anterior a 2.x
-          // El permiso de una cría lo pide su padre.
-          return send("Notification", children.get(p.sessionID)?.parent ?? p.sessionID, {
-            message: p.title ? `Permiso: ${p.title}` : "Permiso pendiente",
-          })
-        case "session.deleted":
-          if (childDone(p.info.id)) return void children.delete(p.info.id)
-          dirs.delete(p.info.id)
-          busy.delete(p.info.id)
-          return send("SessionEnd", p.info.id)
+const handle = (event) => {
+  if (!firstTime(event.id)) return
+  const d = event.data ?? {}
+  const id = d.sessionID
+  const dir = d.location?.directory ?? event.location?.directory
+  if (id && dir && !d.parentID && !state.children.has(id)) state.dirs.set(id, dir)
+  switch (event.type) {
+    case "session.created": {
+      if (d.parentID) {
+        state.children.set(id, { parent: d.parentID, done: false })
+        const kind = d.title || (typeof d.agent === "string" ? d.agent : d.agent?.name) || "subagente"
+        return send("SubagentStart", d.parentID, { agent_id: id, agent_type: kind })
       }
-    },
-    "chat.message": async (input) => {
-      if (children.has(input.sessionID)) return
-      busy.add(input.sessionID)
-      send("UserPromptSubmit", input.sessionID)
-    },
+      return send("SessionStart", id)
+    }
+    case "session.execution.started":
+      if (state.children.has(id)) return
+      return send("UserPromptSubmit", id)
+    case "session.execution.interrupted":
+      // Al apagar OpenCode no hay nada que festejar.
+      if (d.reason === "shutdown") return
+    // fallthrough
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+      if (childDone(id)) return
+      return send("Stop", id)
+    case "permission.asked": {
+      // El permiso de una cría lo pide su padre.
+      const owner = state.children.get(id)?.parent ?? id
+      return send("Notification", owner, { message: d.message ? `Permiso: ${d.message}` : "Permiso pendiente" })
+    }
+    case "session.deleted":
+      if (childDone(id)) return void state.children.delete(id)
+      send("SessionEnd", id)
+      state.dirs.delete(id)
+      return
   }
+}
+
+export default {
+  id: "claude-pet",
+  async setup(ctx) {
+    const controller = new AbortController()
+    ;(async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) handle(event)
+      } catch {}
+    })()
+    return () => controller.abort()
+  },
 }

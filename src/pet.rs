@@ -83,6 +83,12 @@ pub struct Pet {
     pub label: String,
     /// Carpeta de la sesión (para ir a ella con doble clic).
     pub cwd: String,
+    /// App a la cual ir con doble clic cuando la sesión no tiene proceso propio
+    /// (ChatGPT Desktop: sus sesiones de Codex corren en un servicio compartido).
+    pub app: Option<String>,
+    /// Último evento del agente: un monito sin proceso que vigilar se va tras
+    /// un buen rato sin noticias.
+    pub last_event: Instant,
     /// Quién manda los eventos: "Claude", "Codex", "Gemini", "OpenCode"…
     pub agent: String,
     pub color: [u8; 3],
@@ -206,6 +212,8 @@ impl Pet {
         let mut pet = Pet {
             session,
             cwd: String::new(),
+            app: None,
+            last_event: Instant::now(),
             agent,
             color,
             pid,
@@ -356,6 +364,19 @@ impl Pet {
         let kind = if kind.trim().is_empty() { "subagente" } else { kind.trim() };
         self.kits.push(Kit { id, kind: kind.to_string(), born: Instant::now() });
         self.say(format!("+ {kind}"), 1.5);
+    }
+
+    /// Las tareas en segundo plano que Claude Code reporta al terminar cada
+    /// turno (monitores, terminales, workflows) también son crías. Llega la
+    /// lista completa de (id, tipo): las que ya no están, se van.
+    pub fn sync_background(&mut self, tasks: &[(String, String)]) {
+        let ids: Vec<String> = tasks.iter().map(|(id, _)| format!("bg:{id}")).collect();
+        self.kits.retain(|k| !k.id.starts_with("bg:") || ids.contains(&k.id));
+        for ((_, kind), id) in tasks.iter().zip(ids) {
+            if !self.kits.iter().any(|k| k.id == id) {
+                self.kits.push(Kit { id, kind: kind.clone(), born: Instant::now() });
+            }
+        }
     }
 
     /// Se va una cría (SubagentStop): la de ese id, o la más vieja si no hay id.
@@ -1002,6 +1023,20 @@ mod tests {
         assert_eq!(p.kits[0].kind, "Plan", "sin id se va la más vieja");
         p.on_end();
         assert!(p.kits.is_empty(), "al cerrar la sesión no quedan crías");
+    }
+
+    #[test]
+    fn background_tasks_follow_the_reported_list() {
+        let mut p = pet_at(400.0, SCREEN.b - size());
+        p.add_kit(Some("agente"), "Explore");
+        let t = |id: &str, kind: &str| (id.to_string(), kind.to_string());
+        p.sync_background(&[t("1", "monitor"), t("2", "terminal")]);
+        assert_eq!(p.kits.len(), 3);
+        p.sync_background(&[t("2", "terminal")]);
+        let kinds: Vec<&str> = p.kits.iter().map(|k| k.kind.as_str()).collect();
+        assert_eq!(kinds, ["Explore", "terminal"], "el monitor terminó; el subagente no se toca");
+        p.sync_background(&[]);
+        assert_eq!(p.kits.len(), 1);
     }
 
     #[test]

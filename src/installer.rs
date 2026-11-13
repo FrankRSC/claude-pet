@@ -141,9 +141,12 @@ impl Agent {
     }
 
     /// Mete nuestros hooks en `settings`, quitando antes los que hubiera.
-    /// `bin` es la ruta del ejecutable con `/`; con `exec`, en forma exec.
+    /// `bin` es la ruta del ejecutable con `/`; con `exec`, en forma exec. Si
+    /// no, el comando que sirve en el shell de cada sistema (ver `hook_command`).
     fn add_hooks(self, settings: &mut Value, bin: &str, exec: bool) {
         self.strip_hooks(settings);
+        let short = platform::short_path(Path::new(bin)).map(|p| p.display().to_string());
+        let command = hook_command(bin, short.as_deref(), self.name(), cfg!(windows));
         let hooks = settings.as_object_mut().unwrap().entry("hooks").or_insert_with(|| json!({}));
         if !hooks.is_object() {
             *hooks = json!({});
@@ -156,7 +159,7 @@ impl Agent {
             let mut hook = if exec {
                 json!({ "type": "command", "command": bin, "args": ["hook", "--agent", self.name()], "timeout": timeout })
             } else {
-                json!({ "type": "command", "command": format!("\"{bin}\" hook --agent {}", self.name()), "timeout": timeout })
+                json!({ "type": "command", "command": command, "timeout": timeout })
             };
             let mut group = json!({});
             if self == Agent::Gemini {
@@ -176,7 +179,7 @@ impl Agent {
         let is_ours = |group: &Value| {
             group["hooks"]
                 .as_array()
-                .is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(MARKER))))
+                .is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(is_our_command)))
         };
         for groups in hooks.values_mut() {
             if let Some(arr) = groups.as_array_mut() {
@@ -242,6 +245,30 @@ impl Agent {
         }
         Ok(Some(format!("hooks quitados de {}", path.display())))
     }
+}
+
+/// El comando de los hooks que pasan por un shell (todos salvo Claude Code
+/// en Windows, que va en forma exec). En macOS va la ruta entre comillas
+/// (tiene un espacio: "Application Support"). En Windows, Codex y Gemini no
+/// documentan qué shell usan y PowerShell no ejecuta `"C:/…exe" args`: va la
+/// ruta sin comillas y con `/`, que funciona en bash, PowerShell y cmd. Si
+/// tiene espacios (un usuario "Ana Pérez"), su nombre corto 8.3 (`short`);
+/// solo si no lo hay, entre comillas.
+fn hook_command(bin: &str, short: Option<&str>, agent: &str, windows: bool) -> String {
+    let unquoted = |p: &str| {
+        let p = p.replace('\\', "/");
+        (!p.contains(' ')).then_some(p)
+    };
+    match (windows, unquoted(bin).or_else(|| short.and_then(unquoted))) {
+        (true, Some(p)) => format!("{p} hook --agent {agent}"),
+        _ => format!("\"{bin}\" hook --agent {agent}"),
+    }
+}
+
+/// ¿Este comando de hook es nuestro? Con la ruta corta de Windows,
+/// "claude-pet" queda como "CLAUDE~1".
+fn is_our_command(command: &str) -> bool {
+    command.contains(MARKER) || (command.contains(" hook --agent ") && command.to_uppercase().contains("CLAUDE~"))
 }
 
 /// `--agent all` son los agentes cuya carpeta existe; un nombre, ese aunque no exista.
@@ -429,7 +456,9 @@ mod tests {
         // Sin nada nuestro ni ajeno, "hooks" desaparece.
         let mut only_ours = json!({});
         Agent::Codex.add_hooks(&mut only_ours, "/x/claude-pet", false);
-        assert_eq!(only_ours["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], "\"/x/claude-pet\" hook --agent codex");
+        // En Windows sin comillas (ver hook_commands_work_in_every_shell).
+        let codex = if cfg!(windows) { "/x/claude-pet hook --agent codex" } else { "\"/x/claude-pet\" hook --agent codex" };
+        assert_eq!(only_ours["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], codex);
         assert_eq!(only_ours["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
         assert!(only_ours["hooks"]["SubagentStop"].is_array());
         Agent::Codex.strip_hooks(&mut only_ours);
@@ -465,6 +494,27 @@ mod tests {
         assert_eq!(group["hooks"][0]["name"], "claude-pet");
         assert_eq!(group["hooks"][0]["timeout"], 10_000);
         assert!(s["hooks"].get("Stop").is_none());
+    }
+
+    #[test]
+    fn hook_commands_work_in_every_shell() {
+        let mac = "/Users/ana/Library/Application Support/claude-pet/claude-pet";
+        assert_eq!(hook_command(mac, None, "claude", false), format!("\"{mac}\" hook --agent claude"));
+        // Windows sin espacios: sin comillas y con /, para bash, PowerShell y cmd.
+        let win = r"C:\Users\ana\AppData\Local\claude-pet\claude-pet.exe";
+        assert_eq!(
+            hook_command(win, None, "codex", true),
+            "C:/Users/ana/AppData/Local/claude-pet/claude-pet.exe hook --agent codex"
+        );
+        // Con espacios en el usuario: la ruta corta 8.3.
+        let spaced = r"C:\Users\Ana Pérez\AppData\Local\claude-pet\claude-pet.exe";
+        let short = r"C:\Users\ANAPR~1\AppData\Local\CLAUDE~1\CLAUDE~1.EXE";
+        let cmd = hook_command(spaced, Some(short), "claude", true);
+        assert_eq!(cmd, "C:/Users/ANAPR~1/AppData/Local/CLAUDE~1/CLAUDE~1.EXE hook --agent claude");
+        assert!(is_our_command(&cmd), "se reconoce aunque no diga claude-pet");
+        // Sin ruta corta disponible: entre comillas (bash y cmd sí lo aceptan).
+        assert!(hook_command(spaced, None, "claude", true).starts_with('"'));
+        assert!(!is_our_command("python3 otro-hook.py"));
     }
 
     #[test]

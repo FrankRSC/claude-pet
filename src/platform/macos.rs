@@ -371,8 +371,15 @@ fn tty_of(pid: u32) -> Option<String> {
 
 /// La primera app con ventanas (política Regular) subiendo desde `pid`:
 /// (pid de la app, bundle id si tiene).
+///
+/// Empieza por el padre: el proceso de la sesión nunca es la ventana (y el
+/// Claude Code que trae Claude Desktop es una mini app propia que no hay que
+/// activar).
 fn gui_ancestor(pid: u32) -> Option<(u32, Option<String>)> {
-    let mut p = pid;
+    let (mut p, _) = parent_of(pid)?;
+    if p <= 1 {
+        return None;
+    }
     for _ in 0..24 {
         let app: *mut AnyObject =
             unsafe { msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: p as libc::pid_t] };
@@ -481,6 +488,33 @@ fn run_ok(cmd: &str, args: &[&str]) -> bool {
 /// la carpeta en editores tipo VS Code y, si no, la app. Devuelve la app a la
 /// que va (su bundle id), o None si la sesión no tiene ventana; el cambio de
 /// foco ocurre en otro hilo.
+/// La app con ventanas a la que pertenece la sesión `pid` (su bundle id), sin
+/// tocar nada. None si cuelga de un servicio sin ventana (como el
+/// `codex app-server` compartido).
+pub fn app_of(pid: u32) -> Option<String> {
+    let (app_pid, bundle) = gui_ancestor(pid)?;
+    Some(bundle.unwrap_or_else(|| format!("pid {app_pid}")))
+}
+
+/// ChatGPT Desktop (trae Codex).
+pub const CHATGPT: &str = "com.openai.codex";
+
+/// Trae al frente una app si ya está abierta (no la abre si está cerrada).
+pub fn activate_app(bundle: &str) -> bool {
+    let running: usize = objc2::rc::autoreleasepool(|_| unsafe {
+        let Ok(id) = std::ffi::CString::new(bundle) else { return 0 };
+        let ns: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: id.as_ptr()];
+        let list: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationsWithBundleIdentifier: ns];
+        msg_send![list, count]
+    });
+    if running == 0 {
+        return false;
+    }
+    let id = bundle.to_string();
+    std::thread::spawn(move || run_ok("/usr/bin/open", &["-b", &id]));
+    true
+}
+
 pub fn focus_session(pid: u32, cwd: &str) -> Option<String> {
     let (app_pid, bundle) = gui_ancestor(pid)?;
     let Some(bundle) = bundle else {
@@ -584,6 +618,11 @@ pub fn set_autostart(exe: Option<&Path>) {
 }
 
 pub fn attach_console() {}
+
+/// Solo existe en Windows (nombres cortos 8.3).
+pub fn short_path(_: &Path) -> Option<std::path::PathBuf> {
+    None
+}
 
 #[cfg(test)]
 mod tests {

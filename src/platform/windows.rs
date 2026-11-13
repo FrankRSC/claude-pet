@@ -54,6 +54,12 @@ unsafe extern "system" fn pet_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     if msg == WM_NCHITTEST {
         return HTCLIENT as LRESULT;
     }
+    // Al pasar a un monitor con otra escala (100 % → 150 %), Windows le pide a
+    // winit agrandar y mover la ventana: el monito brincaba. Su tamaño y su
+    // posición los manejamos nosotros (en píxeles físicos), así que se ignora.
+    if msg == WM_DPICHANGED {
+        return 0;
+    }
     let prev: WNDPROC = std::mem::transmute(WINIT_PROC.load(Ordering::Relaxed));
     CallWindowProcW(prev, hwnd, msg, wparam, lparam)
 }
@@ -303,14 +309,33 @@ fn window_of(pid: u32) -> Option<HWND> {
     (!data.1.is_null()).then_some(data.1)
 }
 
-/// Trae al frente la ventana de la sesión del proceso `pid`: sube por sus
-/// padres (y la consola `conhost`/`OpenConsole` de cada uno) hasta uno con
-/// ventana visible, sin llegar al Explorador. Devuelve el ejecutable de esa
-/// ventana, o None si no hay. A mejor esfuerzo: Windows no deja elegir la
-/// pestaña de Windows Terminal desde fuera.
-pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
+/// Trae una ventana al frente aunque otra app tenga el foco. Windows solo deja
+/// hacerlo al proceso que tiene la entrada del teclado, así que nos colgamos un
+/// momento de la cola de entrada de la ventana activa (el truco habitual).
+fn bring_to_front(hwnd: HWND) {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        let fg = GetForegroundWindow();
+        let fg_thread = GetWindowThreadProcessId(fg, null_mut());
+        let me = GetCurrentThreadId();
+        let attached = fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, 1) != 0;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(me, fg_thread, 0);
+        }
+    }
+}
+
+/// El proceso (y su ejecutable) con ventana visible del que cuelga `pid`:
+/// sube por sus padres y la consola (`conhost`/`OpenConsole`) de cada uno, sin
+/// llegar al Explorador. Empieza por el padre: la sesión misma no es la ventana.
+fn window_owner(pid: u32) -> Option<(HWND, String)> {
     let table = process_table();
-    let mut p = pid;
+    let (mut p, _) = table.get(&pid)?.clone();
     for _ in 0..24 {
         let (ppid, name) = table.get(&p)?.clone();
         if name.eq_ignore_ascii_case("explorer.exe") {
@@ -322,13 +347,7 @@ pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
             .map(|(c, _)| *c);
         for candidate in std::iter::once(p).chain(consoles) {
             if let Some(hwnd) = window_of(candidate) {
-                unsafe {
-                    if IsIconic(hwnd) != 0 {
-                        ShowWindow(hwnd, SW_RESTORE);
-                    }
-                    SetForegroundWindow(hwnd);
-                }
-                return Some(table.get(&candidate).map_or(name, |(_, n)| n.clone()));
+                return Some((hwnd, table.get(&candidate).map_or(name.clone(), |(_, n)| n.clone())));
             }
         }
         if ppid == 0 || ppid == p {
@@ -337,6 +356,41 @@ pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
         p = ppid;
     }
     None
+}
+
+/// El ejecutable con ventana del que cuelga la sesión `pid`, sin tocar nada.
+pub fn app_of(pid: u32) -> Option<String> {
+    window_owner(pid).map(|(_, exe)| exe)
+}
+
+/// ChatGPT Desktop (trae Codex).
+pub const CHATGPT: &str = "ChatGPT.exe";
+
+/// Trae al frente la ventana de una app ya abierta, por su ejecutable.
+pub fn activate_app(exe: &str) -> bool {
+    let table = process_table();
+    let hwnd = table
+        .iter()
+        .filter(|(_, (_, n))| n.eq_ignore_ascii_case(exe))
+        .find_map(|(pid, _)| window_of(*pid));
+    match hwnd {
+        Some(h) => {
+            bring_to_front(h);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Trae al frente la ventana de la sesión del proceso `pid`: sube por sus
+/// padres (y la consola `conhost`/`OpenConsole` de cada uno) hasta uno con
+/// ventana visible, sin llegar al Explorador. Devuelve el ejecutable de esa
+/// ventana, o None si no hay. A mejor esfuerzo: Windows no deja elegir la
+/// pestaña de Windows Terminal desde fuera.
+pub fn focus_session(pid: u32, _cwd: &str) -> Option<String> {
+    let (hwnd, exe) = window_owner(pid)?;
+    bring_to_front(hwnd);
+    Some(exe)
 }
 
 /// El WAV que está tocando: PlaySound lee de esta memoria mientras suena.
@@ -425,6 +479,20 @@ pub fn set_autostart(exe: Option<&Path>) {
             }
         }
     }
+}
+
+/// El nombre corto 8.3 de una ruta (sin espacios), si el disco los tiene.
+pub fn short_path(path: &Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let n = unsafe { GetShortPathNameW(wide.as_ptr(), null_mut(), 0) };
+    if n == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; n as usize];
+    let m = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), n) };
+    (m > 0 && m < n).then(|| std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..m as usize])))
 }
 
 /// En release el .exe es de subsistema "windows"; esto recupera la consola

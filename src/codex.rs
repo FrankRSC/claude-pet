@@ -33,9 +33,21 @@ pub struct Session {
 
 /// Procesos de Codex con alguien del otro lado.
 pub fn clients() -> Vec<ProcInfo> {
-    platform::processes_named("codex")
+    clients_of("codex")
+}
+
+/// Procesos de terminal de un agente que corre sus sesiones en un servicio
+/// compartido: Codex (`codex`, sin `app-server`…) y OpenCode (`opencode`, sin
+/// `serve`). En Windows no hay argv, así que entran todos.
+pub fn clients_of(agent: &str) -> Vec<ProcInfo> {
+    let services: &[&str] = match agent {
+        "codex" => &SERVICES,
+        "opencode" => &["serve", "web", "acp", "mcp"],
+        _ => return Vec::new(),
+    };
+    platform::processes_named(agent)
         .into_iter()
-        .filter(|p| !p.args.iter().skip(1).any(|a| SERVICES.contains(&a.as_str())))
+        .filter(|p| !p.args.iter().skip(1).any(|a| services.contains(&a.as_str())))
         .collect()
 }
 
